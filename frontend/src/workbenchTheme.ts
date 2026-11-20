@@ -47,7 +47,7 @@ export const workbenchTheme: ThemeConfig = {
     controlHeight: 36,
     borderRadius: 6,
     fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
-    fontSize: 14,
+    fontSize: 16,
     motion: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
   },
   components: {

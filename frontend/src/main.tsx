@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Menu, Select, Segmented, Space, Table, Tag, Typography, theme } from 'antd'
+import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Menu, Select, Space, Table, Tag, Typography, theme } from 'antd'
 import { ApartmentOutlined, BookOutlined, CloudUploadOutlined, DashboardOutlined, RadarChartOutlined, SendOutlined, SettingOutlined } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import AgentWorkbench, { ReviewPanel, runNames } from './AgentWorkbench'
@@ -45,6 +45,9 @@ function StudentRadar({ axes, compare, onSelect }: {
   const { token } = theme.useToken()
   const ref = useRef<HTMLDivElement>(null)
   const instance = useRef<ReturnType<typeof echarts.init>>(null)
+  const comparison = new Map(compare.map(axis => [axis.id, axis.score]))
+  const previous = axes.map(axis => comparison.get(axis.id))
+  const hasComparison = previous.length > 0 && previous.every(value => value != null)
   const latest = useRef({ axes, onSelect })
   useLayoutEffect(() => { latest.current = { axes, onSelect } })
   useEffect(() => {
@@ -52,7 +55,7 @@ function StudentRadar({ axes, compare, onSelect }: {
     const chart = echarts.init(ref.current)
     instance.current = chart
     chart.on('click', event => {
-      const axis = latest.current.axes.find(item => item.label === event.name)
+      const axis = latest.current.axes.find(item => item.label === event.name?.replace(/\n/g, ''))
       if (axis) latest.current.onSelect(axis)
     })
     const observer = new ResizeObserver(() => chart.resize())
@@ -61,27 +64,38 @@ function StudentRadar({ axes, compare, onSelect }: {
   }, [])
   useEffect(() => {
     const complete = axes.every(axis => axis.score != null)
-    const comparison = new Map(compare.map(axis => [axis.id, axis.score]))
-    const previous = axes.map(axis => comparison.get(axis.id))
     instance.current?.setOption({
-      animation: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-      tooltip: {},
-      radar: { indicator: axes.map(axis => ({ name: axis.label, max: 100 })), radius: '60%',
-        triggerEvent: true, axisName: { color: token.colorTextSecondary, width: 100, overflow: 'break' } },
-      series: [{ type: 'radar', lineStyle: { width: complete ? 2 : 0 }, symbolSize: 8,
-        data: [{ name: '学生', value: axes.map(axis => axis.score ?? NaN), itemStyle: { color: token.colorPrimary },
-          areaStyle: { opacity: complete ? 0.18 : 0 } },
-          ...(previous.length && previous.every(value => value != null) ? [{ name: '班级参照', value: previous,
-            itemStyle: { color: chartComparisonColor }, lineStyle: { width: 1, type: 'dashed' } }] : [])] }],
+      baseOption: {
+        animation: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+        tooltip: { textStyle: { fontSize: token.fontSizeSM } },
+        textStyle: { fontFamily: token.fontFamily, fontSize: token.fontSizeSM },
+        radar: { indicator: axes.map(axis => ({ name: axis.label, max: 100 })), radius: '53%', axisNameGap: 8,
+          triggerEvent: true, axisName: { color: token.colorTextSecondary, fontSize: token.fontSizeSM, width: 94, overflow: 'break' } },
+        series: [{ type: 'radar', lineStyle: { width: complete ? 2 : 0 }, symbolSize: 8,
+          data: [{ name: '学生', value: axes.map(axis => axis.score ?? NaN), itemStyle: { color: token.colorPrimary },
+            areaStyle: { opacity: complete ? 0.18 : 0 } },
+            ...(hasComparison ? [{ name: '班级参照', value: previous,
+              itemStyle: { color: chartComparisonColor }, lineStyle: { width: 1, type: 'dashed' } }] : [])] }],
+      },
+      media: [{ query: { maxWidth: 365 }, option: {
+        radar: { radius: '41%', axisName: {
+          lineHeight: 19,
+          formatter: (label: string) => label.match(/.{1,5}/gu)?.join('\n') || label,
+        } },
+      } }],
     }, { notMerge: true })
   }, [axes, compare, token])
-  return <div className="chart radar" ref={ref} role="img" aria-label="学生学习表现雷达图" />
+  return <section className="student-radar" aria-label="整体轮廓">
+    <Title level={5}>整体轮廓</Title>
+    <Space wrap className="radar-legend"><span>学生</span>{hasComparison && <span className="radar-class">班级参照</span>}</Space>
+    <div className="chart radar" ref={ref} role="img" aria-label="学生学习表现雷达图" />
+  </section>
 }
 
 function Comparison({ axes, compare, select }: { axes: Axis[]; compare: Axis[]; select: (axis: Axis) => void }) {
   const byId = new Map(compare.map(axis => [axis.id, axis]))
   if (!axes.length) return null
-  return <section className="spaced" aria-label="学生与班级对照">
+  return <section className="student-comparison" aria-label="学生与班级对照">
     <Title level={5}>学生与班级对照</Title>
     <Text type="secondary">实心圆为学生，空心菱形为班级 · 0–100%</Text>
     {axes.map(axis => {
@@ -141,7 +155,6 @@ function Workbench() {
   const [mapping, setMapping] = useState('{}')
   const [selected, setSelected] = useState<Row>()
   const [answerId, setAnswerId] = useState('')
-  const [studentView, setStudentView] = useState<'指标对照' | '整体轮廓'>('指标对照')
   const [profileSnapshot, setProfileSnapshot] = useState('')
   const [focusIndicator, setFocusIndicator] = useState('')
   const [citation, setCitation] = useState<Row>()
@@ -311,13 +324,6 @@ function Workbench() {
   const studentChoice = <Select aria-label="选择学生" placeholder="选择学生" value={student || undefined} style={{ width: 170 }}
     showSearch onChange={v => { setStudent(v); setProfileSnapshot(''); setTopic('') }}
     options={students.filter(s => !classFilter || s.模拟班级编号 === classFilter).map(s => ({ value: s.学生编号, label: s.学生编号 + ' · ' + s.模拟班级编号 }))} />
-  function axisTable(source: Axis[], group?: string) {
-    return <Table rowKey="id" size="small" pagination={false} dataSource={source} columns={[
-      { title: '指标', dataIndex: 'label', render: (_, a) => <Button type="link" onClick={() => chooseEvidence(a, group)}>{a.label}</Button> },
-      { title: '得分率', dataIndex: 'score', render: (v, a) => v === null ? a.status : v + '%' },
-      { title: '有效作答', dataIndex: 'n' }, { title: '覆盖', render: (_, a) => a.coverage + '/' + a.population },
-    ]} />
-  }
   return <Layout className="shell">
     <Layout.Sider width={200} className="sidebar">
       <div className="brand"><span className="brand-symbol"><ApartmentOutlined /></span><div>智慧学伴<small>教师工作台</small></div></div>
@@ -331,7 +337,7 @@ function Workbench() {
         openReplay={openReplay} openImport={() => goTo('import')} openEvidence={target => void readEvidence(target)}
         openStudent={(student, node, snapshot, indicator) => {
           setClassFilter(''); setStudent(student); setNode(node); setProfileSnapshot(snapshot); setTopic('')
-          setStudentView('指标对照'); setFocusIndicator(indicator); goTo('student')
+          setFocusIndicator(indicator); goTo('student')
         }}
         launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
       {page === 'agent' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
@@ -391,13 +397,14 @@ function Workbench() {
           {hits.map(h => <Paragraph key={h.id} className="spaced"><Button type="link" onClick={() => setCitation(h)}>{h.title} · {h.locator}</Button> {h.text.slice(0, 130)}</Paragraph>)}</Card>
       </>}
       {page === 'student' && <>
-        <Card title="学生学习表现" extra={<Space wrap><Select allowClear placeholder="筛选班级" onChange={v => { setClassFilter(v || ''); setStudent('') }} options={groups.map(g => ({ value: g.group }))} />{studentChoice}{nodeChoice}</Space>}>
+        <Card className="student-profile-card" title="学生学习表现" extra={<Space wrap><Select allowClear placeholder="筛选班级" onChange={v => { setClassFilter(v || ''); setStudent('') }} options={groups.map(g => ({ value: g.group }))} />{studentChoice}{nodeChoice}</Space>}>
           {!student ? <Empty description="选择学生查看指标对照和作答" /> : <>
             <Space wrap><Button type={!topic ? 'primary' : 'default'} onClick={() => setTopic('')}>主题总览</Button>
               {(current.topics || []).map((a: Axis) => <Button key={a.id} type={topic === a.id ? 'primary' : 'default'} onClick={() => setTopic(a.id)}>{a.label}</Button>)}</Space>
-            <div className="spaced"><Segmented aria-label="学生画像视图" options={['指标对照', '整体轮廓']} value={studentView} onChange={setStudentView} /></div>
-            {studentView === '整体轮廓' ? <>{!!axes.length && <StudentRadar axes={topic ? axes : current.topics || noAxes} compare={topic ? compare : comparison.topics || noAxes} onSelect={chooseEvidence} />}{axisTable(axes)}</>
-              : <Comparison axes={axes} compare={compare} select={chooseEvidence} />}
+            {!!axes.length && <div className="student-profile-grid">
+              <StudentRadar axes={topic ? axes : current.topics || noAxes} compare={topic ? compare : comparison.topics || noAxes} onSelect={chooseEvidence} />
+              <Comparison axes={axes} compare={compare} select={chooseEvidence} />
+            </div>}
             {!!current.totals?.length && <Table rowKey="节点编号" dataSource={current.totals} pagination={false} columns={[{ title: '测验', dataIndex: '节点编号' }, { title: '总分', dataIndex: '测验总分' }]} />}
             <Space className="spaced"><Button type="primary" loading={busy} onClick={() => launch({ student, snapshot_id: data.snapshot_id })}>生成学习建议</Button><Button loading={busy} onClick={() => launch({ student, variant: true, snapshot_id: data.snapshot_id })}>生成建议与变式题</Button></Space>
           </>}
