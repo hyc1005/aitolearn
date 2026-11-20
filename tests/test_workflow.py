@@ -127,6 +127,27 @@ class WorkflowTests(TestCase):
             question = next(r for r in rows if r["材料编号"] == "Q015")
             self.assertEqual((question["得分"], question["满分"]), ("2", "3"))
 
+    def test_distribution_matches_pinned_evidence_and_profile(self):
+        batch = self.post_import()
+        self.run_cleaning(batch["run_id"])
+        snapshot = self.confirm(batch).json()["snapshot_id"]
+        common = {"group": "DC02", "node": "N01", "snapshot_id": snapshot}
+        profiles = self.client.get("/api/profiles", params=common).json()
+        self.assertEqual(profiles["snapshot_id"], snapshot)
+        axis = next(axis for axis in profiles["profile"]["axes"] if axis["id"] == "T01I2")
+        target = {**common, "indicator": axis["id"]}
+        result = self.client.get("/api/profiles/distribution", params=target).json()
+        self.assertEqual({key: result[key] for key in target}, target)
+        self.assertEqual(sorted(row["score"] for row in result["students"]), axis["distribution"])
+        self.assertEqual(sum(row["n"] for row in result["students"]), axis["n"])
+        for point in result["students"]:
+            rows = self.client.get("/api/profiles/evidence", params={**target, "student": point["student"]}).json()
+            self.assertEqual(len(rows), point["n"])
+            rate = 100 * sum(int(row["得分"]) for row in rows) / sum(int(row["满分"]) for row in rows)
+            self.assertEqual(point["score"], round(rate, 1))
+        self.assertEqual(self.client.get("/api/profiles", params={**common, "snapshot_id": "missing"}).status_code, 404)
+        self.assertEqual(self.client.get("/api/profiles/distribution", params={**target, "snapshot_id": "missing"}).status_code, 404)
+
     def test_recommendation_pins_versions_and_checks_anchor_scope(self):
         batch = self.post_import()
         self.run_cleaning(batch["run_id"])

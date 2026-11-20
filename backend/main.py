@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .agent import api_key
-from .data import profile, read_file
+from .data import profile, read_file, student_scores
 from .recommendation_review import preview_text
 from .search import search
 from .snapshots import current_snapshot, legacy_batches, queue_cleaning, queue_job, table_data
@@ -116,19 +116,27 @@ def q015_case():
         snapshot_id = (initial_run.get("payload") or {}).get("snapshot_id")
         snapshot_id = snapshot_id or (first or second or {}).get("snapshot_id")
         snapshot = get(conn, "snapshot", snapshot_id) if snapshot_id else None
+        alternatives = [draft for draft in all_of(conn, "draft")
+                        if snapshot and draft.get("snapshot_id") == snapshot_id and draft.get("student")
+                        and draft["student"] != "D01" and draft.get("evidence") and draft.get("exercises")]
 
     evidence = None
+    indicator = None
+    returned_question = None
     if snapshot:
         data = table_data(snapshot)
         row = data["作答记录"].get("D01-N01-Q015")
         if row:
             evidence = {**row, "题目": data["题目与材料"].get("Q015", {})}
+        indicator = data["课程要求"].get("T01I2")
+        returned_question = data["题目与材料"].get("Q004", {}).get("题干或内容")
 
     def suggestion(draft):
         if draft is None:
             return None
         return {field: draft.get(field) for field in
-                ("revision", "observation", "message", "exercises", "citations")}
+                ("revision", "observation", "message", "exercises", "citations", "student",
+                 "node", "approved", "review_state", "evidence", "questions")}
 
     def review(run, draft, revision):
         if (run.get("result") or {}) != {"draft": draft_id, "revision": revision}:
@@ -139,12 +147,23 @@ def q015_case():
         return {"review": result, "confirmed": bool(
             draft and draft.get("approved") and run.get("confirmed_at")), "run_id": run["id"]}
 
-    return {"snapshot_id": snapshot_id, "steps": [
+    accepted = review(final_run, second, 2)
+    main_questions = [item["question_id"] for item in (second or {}).get("exercises", [])]
+    comparisons = sorted((draft for draft in alternatives
+                          if [item["question_id"] for item in draft["exercises"]] != main_questions),
+                         key=lambda draft: (draft.get("node") != "N01", draft["student"], draft["id"]))
+    by_student = {}
+    for draft in comparisons:
+        by_student.setdefault(draft["student"], draft)
+    return {"snapshot_id": snapshot_id, "indicator": indicator, "returned_question": returned_question,
+            "comparisons": [suggestion(draft) for draft in by_student.values()],
+            "student_preview": preview_text(second) if accepted and accepted["confirmed"] else None,
+            "steps": [
         {"title": "D01 · N01 · Q015 作答", "evidence": evidence},
         {"title": "初版建议", "before": suggestion(first)},
         {"title": "初次终审", "result": review(initial_run, first, 1)},
         {"title": "教师修订", "before": suggestion(first), "after": suggestion(second)},
-        {"title": "修订 2 终审", "result": review(final_run, second, 2)},
+        {"title": "修订 2 终审", "result": accepted},
     ]}
 
 
@@ -330,15 +349,16 @@ def curriculum():
 
 
 @app.get("/api/profiles")
-def profiles(student: str = "", group: str = "", node: str = ""):
+def profiles(student: str = "", group: str = "", node: str = "", snapshot_id: str = ""):
     with db() as conn:
-        active = current_snapshot(conn)
+        active = require(conn, "snapshot", snapshot_id) if snapshot_id else current_snapshot(conn)
         data = table_data(active)
     students = list(data["模拟学生"].values())
     groups = sorted({r["模拟班级编号"] for r in students})
-    return {"profile": profile(data, student, group, node), "students": students,
-            "groups": [profile(data, group=g, node=node) for g in groups],
-            "nodes": list(data["测验节点"].keys()), "snapshot_id": active["id"] if active else None}
+    return {"profile": profile(data, student, group, node, include_question_scope=True), "students": students,
+            "groups": [profile(data, group=g, node=node, include_question_scope=True) for g in groups],
+            "nodes": list(data["测验节点"].keys()), "snapshot_id": active["id"] if active else None,
+            "node_details": list(data["测验节点"].values()), "curriculum": list(data["课程要求"].values())}
 
 
 @app.get("/api/profiles/evidence")
@@ -351,6 +371,16 @@ def evidence(indicator: str, student: str = "", group: str = "", node: str = "",
         raise HTTPException(404, "指标不存在")
     return [{**row, "题目": data["题目与材料"][row["材料编号"]]} for key in selected["attempt_ids"]
             if (row := data["作答记录"].get(key))]
+
+
+@app.get("/api/profiles/distribution")
+def distribution(indicator: str, group: str, node: str, snapshot_id: str):
+    if not all((group, node, snapshot_id)):
+        raise HTTPException(422, "请选择班级、测验和数据快照")
+    rows = evidence(indicator, group=group, node=node, snapshot_id=snapshot_id)
+    return {"snapshot_id": snapshot_id, "group": group, "node": node, "indicator": indicator,
+            "students": [{"student": key, "score": round(100 * score / maximum, 1), "n": count}
+                         for key, (score, maximum, count) in sorted(student_scores(rows).items())]}
 
 
 @app.get("/api/materials")

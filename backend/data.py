@@ -170,7 +170,7 @@ def clean(rows):
                     "students": len(tables["模拟学生"]), "issues": issues}
 
 
-def profile(tables, student="", group="", node=""):
+def profile(tables, student="", group="", node="", include_question_scope=False):
     people = {key for key, row in tables["模拟学生"].items()
               if (not group or row["模拟班级编号"] == group) and (not student or key == student)}
     nodes = [row for key, row in tables["测验节点"].items() if not node or key == node]
@@ -180,32 +180,40 @@ def profile(tables, student="", group="", node=""):
     eligible_questions = [q for key, q in tables["题目与材料"].items() if key in range_ids]
     axes = []
     for key, indicator in tables["课程要求"].items():
-        axes.append(axis(key, indicator.get("观察指标", key), attempts, people, eligible_questions))
+        axes.append(axis(key, indicator.get("观察指标", key), attempts, people, eligible_questions, include_question_scope))
     topics = {}
     for row in tables["课程要求"].values():
         topics[row["主题编号"]] = row.get("主题", row["主题编号"])
     return {"student": student, "group": group, "node": node, "size": len(people),
-            "axes": axes, "topics": [axis(k, name, attempts, people, eligible_questions) for k, name in topics.items()],
+            "axes": axes, "topics": [axis(k, name, attempts, people, eligible_questions, include_question_scope)
+                                      for k, name in topics.items()],
             "totals": [r for r in tables["总分"].values() if r["学生编号"] in people and (not node or r.get("节点编号") == node)]}
 
 
-def axis(key, label, attempts, people, eligible_questions):
+def student_scores(scored):
+    totals = defaultdict(lambda: [0, 0, 0])
+    for row in scored:
+        student = totals[row["学生编号"]]
+        student[0] += int(row["得分"])
+        student[1] += int(row["满分"])
+        student[2] += 1
+    return totals
+
+
+def axis(key, label, attempts, people, eligible_questions, include_question_scope=False):
     topic = len(key) == 3
     def matches(record, indicators):
         return record.get("主题编号") == key if topic else key in indicators
     observed = [r for r in attempts if matches(r, r["指标"])]
     scored = [r for r in observed if r["评分状态"] == "已评分"]
-    per_person = defaultdict(lambda: [0, 0])
-    for row in scored:
-        totals = per_person[row["学生编号"]]
-        totals[0] += int(row["得分"])
-        totals[1] += int(row["满分"])
-    rates = [100 * s / m for s, m in per_person.values()]
+    per_person = student_scores(scored)
+    rates = [100 * s / m for s, m, _ in per_person.values()]
     distribution = sorted(round(rate, 1) for rate in rates)
-    taught = any(matches(q, split(q.get("指标编号", ""))) for q in eligible_questions)
+    question_ids = [q["材料编号"] for q in eligible_questions if matches(q, split(q.get("指标编号", "")))]
     return {"id": key, "label": label, "score": round(sum(rates) / len(rates), 1) if rates else None,
-            "earned": sum(s for s, _ in per_person.values()), "possible": sum(m for _, m in per_person.values()),
+            "earned": sum(s for s, _, _ in per_person.values()), "possible": sum(m for _, m, _ in per_person.values()),
             "n": len(scored), "coverage": len(per_person), "population": len(people), "distribution": distribution,
-            "status": "已评分" if scored else ("未教学" if not taught else "无有效评分"),
+            "status": "已评分" if scored else ("未教学" if not question_ids else "无有效评分"),
+            **({"question_ids": question_ids} if include_question_scope else {}),
             "states": {state: sum(r["评分状态"] == state for r in observed) for state in ALLOWED},
             "attempt_ids": [r["作答事件编号"] for r in scored]}
