@@ -159,7 +159,7 @@ export function Diagnostics({ data, count, attempts, active, busy, api, openRepl
     <div className={'diagnostic-layout' + (selectedAxis && !useDrawer ? ' has-evidence' : '')}>
       <section className="diagnostic-panel matrix-panel" aria-label="课程指标矩阵">
         <header className="diagnostic-toolbar">
-          <div><h2>课程指标矩阵</h2><p>七年级数学</p></div>
+          <h2>课程指标矩阵</h2>
           <Space wrap>
             <Select aria-label="班级" value={visibleGroup} onChange={value => { setGroup(value); setStudent('') }}
               options={[{value: '', label: '全部班级'}, ...groups.map(value => ({value, label: value}))]} />
@@ -172,10 +172,15 @@ export function Diagnostics({ data, count, attempts, active, busy, api, openRepl
         {matrixError ? <Empty description={matrixError}><Button onClick={() => setReload(value => value + 1)}>重新读取</Button></Empty>
           : !currentMatrix ? <Skeleton active /> : <div className="matrix-scroll">
             <table className="curriculum-matrix">
-              <thead><tr><th scope="col">课程指标</th>{columns.map(column => <th scope="col" key={column.node + column.group}>
-                <span>{column.node}</span><small>{column.group}</small>
-              </th>)}</tr></thead>
-              <tbody>{rows.map((row, index) => <tr key={row.指标编号}>
+              <thead>
+                <tr><th scope="col" rowSpan={2}>课程指标</th>{[...new Set(columns.map(column => column.node))].map(node =>
+                  <th key={node} colSpan={columns.filter(column => column.node === node).length}
+                    className="matrix-node" data-active={validCell?.node === node}>{node}</th>)}</tr>
+                <tr>{columns.map(column => <th scope="col" key={column.node + column.group}
+                  data-active={validCell?.node === column.node && validCell.group === column.group}>{column.group}</th>)}</tr>
+              </thead>
+              <tbody>{rows.map((row, index) => <tr key={row.指标编号} data-active={validCell?.indicator === row.指标编号}
+                data-topic-start={index === 0 || row.主题编号 !== rows[index - 1].主题编号}>
                 <th scope="row">{(index === 0 || row.主题编号 !== rows[index - 1].主题编号) && <small>{row.主题 || row.主题编号}</small>}
                   <span>{axisFor(columns[0], row.指标编号)?.label || row.指标编号}</span>
                   {visibleMode === '班级差异' && difference(row.指标编号) > 0 && <small>最大差 {difference(row.指标编号).toFixed(1)} 个百分点</small>}

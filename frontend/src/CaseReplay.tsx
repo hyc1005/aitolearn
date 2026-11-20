@@ -134,13 +134,14 @@ export function CaseReplay({ data, openCitation }: { data: CaseData; openCitatio
         {index === 1 && (answer ? <AnswerEvidence answer={answer} onInspect={pause} /> : <Empty description="缺少该快照中的 Q015 作答" />)}
         {index === 2 && <>
           {before && <div className="revision-pair"><div><span className="small-label">Q004 题干</span><p>{data.returned_question || '题干未保存'}</p></div>
-            <div><span className="small-label">初版提示</span><ol>{before.exercises.find(item => item.question_id === 'Q004')?.hints.map((hint, number) => <li key={number}>{hint}</li>)}</ol></div></div>}
+            <div><span className="small-label">初版提示</span><ol>{before.exercises.find(item => item.question_id === 'Q004')?.hints.map((hint, number) =>
+              <li key={number}>{hint.split(/(去括号)/).map((fragment, index) => fragment === '去括号' ? <mark key={index}>{fragment}</mark> : fragment)}</li>)}</ol></div></div>}
           {rejected ? <div className="spaced"><ReviewPanel review={rejected.review} /></div> : <Empty description="缺少初次终审记录" />}
           {citations(before?.citations?.filter(item => item.locator === 'Q004'))}
         </>}
         {index === 3 && <>
           {before && after ? <RevisionComparison before={before} after={after} question={data.returned_question} /> : <Empty description="缺少建议修订记录" />}
-          {reviewed && <div className="spaced"><ReviewPanel review={reviewed.review} />{reviewed.confirmed && <Tag color="green">教师已确认修订 {after?.revision}</Tag>}</div>}
+          {reviewed && <div className="spaced"><ReviewPanel review={reviewed.review} />{reviewed.confirmed && <Tag color="success">教师已确认修订 {after?.revision}</Tag>}</div>}
           {data.student_preview && <details className="spaced" onToggle={event => { if (event.currentTarget.open) pause() }}>
             <summary>查看学生练习单</summary><p className="preserve">{data.student_preview}</p></details>}
           {citations(after?.citations)}

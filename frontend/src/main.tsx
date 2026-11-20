@@ -8,6 +8,7 @@ import { CaseReplay, type CaseData } from './CaseReplay'
 import { CleaningCounts, issueFilters } from './CleaningCounts'
 import { Diagnostics, type DiagnosticSelection, type DiagnosticAxis, type Profile } from './Diagnostics'
 import { AnswerEvidence } from './AnswerEvidence'
+import { applyWorkbenchPalette, chartComparisonColor, workbenchTheme } from './workbenchTheme'
 import * as echarts from 'echarts/core'
 import { RadarChart } from 'echarts/charts'
 import { RadarComponent, TooltipComponent } from 'echarts/components'
@@ -71,7 +72,7 @@ function StudentRadar({ axes, compare, onSelect }: {
         data: [{ name: '学生', value: axes.map(axis => axis.score ?? NaN), itemStyle: { color: token.colorPrimary },
           areaStyle: { opacity: complete ? 0.18 : 0 } },
           ...(previous.length && previous.every(value => value != null) ? [{ name: '班级参照', value: previous,
-            itemStyle: { color: '#9b6332' }, lineStyle: { width: 1, type: 'dashed' } }] : [])] }],
+            itemStyle: { color: chartComparisonColor }, lineStyle: { width: 1, type: 'dashed' } }] : [])] }],
     }, { notMerge: true })
   }, [axes, compare, token])
   return <div className="chart radar" ref={ref} role="img" aria-label="学生学习表现雷达图" />
@@ -318,9 +319,9 @@ function Workbench() {
     ]} />
   }
   return <Layout className="shell">
-    <Layout.Sider width={234} theme="light" className="sidebar">
+    <Layout.Sider width={200} className="sidebar">
       <div className="brand"><span className="brand-symbol"><ApartmentOutlined /></span><div>智慧学伴<small>教师工作台</small></div></div>
-      <Menu selectedKeys={[page]} mode="inline" items={pages.map(([key, label, icon]) => ({ key, label, icon }))} onClick={e => goTo(e.key)} />
+      <Menu theme="dark" selectedKeys={[page]} mode="inline" items={pages.map(([key, label, icon]) => ({ key, label, icon }))} onClick={e => goTo(e.key)} />
     </Layout.Sider>
     <Layout.Content className="content">
       {page !== 'overview' && <header className="page-head"><Title level={2}>{pages.find(p => p[0] === page)?.[1]}</Title>
@@ -411,9 +412,9 @@ function Workbench() {
         <Card title="投递记录"><Table rowKey="id" dataSource={deliveries} columns={['student','group','state','message'].map((k,i) => ({ dataIndex: k, title: ['学生','收件群','状态','备注'][i] }))} /></Card>
       </>}
       {page === 'settings' && <>
-        <Card title="本机依赖"><Space wrap><Tag color={health.model_configured ? 'green' : 'orange'}>GLM {health.model_configured ? '已配置' : '待配置'}</Tag><Tag color={health.ocr_configured ? 'green' : 'orange'}>PaddleOCR {health.ocr_configured ? '已配置' : '待安装'}</Tag></Space></Card>
+        <Card title="本机依赖"><Space wrap><Tag color={health.model_configured ? 'success' : 'warning'}>GLM {health.model_configured ? '已配置' : '待配置'}</Tag><Tag color={health.ocr_configured ? 'success' : 'warning'}>PaddleOCR {health.ocr_configured ? '已配置' : '待安装'}</Tag></Space></Card>
         <Card title="后台任务"><Table rowKey="id" dataSource={jobs} columns={[{ title: '类型', render: (_,j) => ({ extract:'解析资料', publish:'建立索引', ...runNames } as Row)[j.kind] },
-          { title: '状态', render: (_,j) => <Tag color={j.state === 'failed' ? 'red' : 'blue'}>{({ queued:'排队', running:'处理中', done:'完成', failed:'失败' } as Row)[j.state]}</Tag> },
+          { title: '状态', render: (_,j) => <Tag color={j.state === 'failed' ? 'error' : j.state === 'done' ? 'success' : 'processing'}>{({ queued:'排队', running:'处理中', done:'完成', failed:'失败' } as Row)[j.state]}</Tag> },
           { title: '错误', dataIndex: 'error' }, { title: '操作', render: (_,j) => j.state === 'failed' ? <Button onClick={() => perform(() => api('/jobs/' + j.id + '/retry', post))}>重试</Button> : null }]} /></Card>
       </>}
     </Layout.Content>
@@ -529,8 +530,5 @@ function Workbench() {
   </Layout>
 }
 
-createRoot(document.getElementById('root')!).render(<ConfigProvider locale={zhCN} theme={{ token: {
-  colorPrimary:'#176B59', colorBgLayout:'#F5F6F2', colorText:'#172D28', borderRadius:8, controlHeight:36,
-  fontFamily:'Inter, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif', fontSize:14,
-  motion: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-}, components: { Menu: { itemSelectedBg:'#e3f2eb', itemSelectedColor:'#145b4c' } } }}><App><Workbench /></App></ConfigProvider>)
+applyWorkbenchPalette()
+createRoot(document.getElementById('root')!).render(<ConfigProvider locale={zhCN} theme={workbenchTheme}><App><Workbench /></App></ConfigProvider>)

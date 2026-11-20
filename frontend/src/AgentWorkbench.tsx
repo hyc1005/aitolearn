@@ -42,9 +42,9 @@ export function ReviewPanel({ review, openRef, canOpenRef, collapseDetails }: {
   return <>
     <Space wrap>
       {review.model && <Tag>{review.model}</Tag>}
-      {review.decision && <Tag color={['pass', 'ready'].includes(review.decision) ? 'green' : 'orange'}>{reviewNames[review.decision]}</Tag>}
+      {review.decision && <Tag color={['pass', 'ready'].includes(review.decision) ? 'success' : 'warning'}>{reviewNames[review.decision]}</Tag>}
       {Object.entries(review.checks || {}).map(([key, value]) =>
-        <Tag key={key} color={value === 'pass' ? 'green' : 'orange'}>{checks[key]} · {value === 'pass' ? '通过' : '退回'}</Tag>)}
+        <Tag key={key} color={value === 'pass' ? 'success' : 'warning'}>{checks[key]} · {value === 'pass' ? '通过' : '退回'}</Tag>)}
     </Space>
     {collapseDetails ? <details className="spaced"><summary>查看模型检查意见</summary>{details}</details> : details}
   </>
@@ -71,7 +71,7 @@ export default function AgentWorkbench(props: Props) {
       columns={[
         { title: '任务', render: (_, row) => runNames[row.kind] },
         { title: '对象', render: (_, row) => row.payload.label || row.payload.student || row.payload.group },
-        { title: '阶段', render: (_, row) => <Tag color={row.state === 'failed' ? 'red' : row.stage === 'confirm' ? 'orange' : 'blue'}>{runStatus(row)}</Tag> },
+        { title: '阶段', render: (_, row) => <Tag color={row.state === 'failed' ? 'error' : row.stage === 'confirm' ? 'warning' : 'processing'}>{runStatus(row)}</Tag> },
         { title: '创建时间', render: (_, row) => new Date(row.created * 1000).toLocaleString('zh-CN') },
         { title: '', render: (_, row) => <Button onClick={() => props.open(row.id)}>{row.stage === 'confirm' ? '核对并确认' : '查看运行'}</Button> },
       ]} />
