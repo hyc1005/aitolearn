@@ -1,25 +1,26 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Menu, Select, Space, Statistic, Table, Tag, Typography, theme } from 'antd'
+import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Menu, Select, Segmented, Space, Table, Tag, Typography, theme } from 'antd'
 import { ApartmentOutlined, BookOutlined, CloudUploadOutlined, DashboardOutlined, RadarChartOutlined, SendOutlined, SettingOutlined } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import AgentWorkbench, { ReviewPanel, runNames } from './AgentWorkbench'
 import { CaseReplay, type CaseData } from './CaseReplay'
 import { CleaningCounts, issueFilters } from './CleaningCounts'
+import { Diagnostics, type DiagnosticSelection, type DiagnosticAxis, type Profile } from './Diagnostics'
+import { AnswerEvidence } from './AnswerEvidence'
 import * as echarts from 'echarts/core'
-import { HeatmapChart, RadarChart } from 'echarts/charts'
-import { GridComponent, RadarComponent, TooltipComponent, VisualMapComponent } from 'echarts/components'
+import { RadarChart } from 'echarts/charts'
+import { RadarComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import './style.css'
 
-echarts.use([HeatmapChart, RadarChart, GridComponent, RadarComponent, TooltipComponent, VisualMapComponent, CanvasRenderer])
+echarts.use([RadarChart, RadarComponent, TooltipComponent, CanvasRenderer])
 const { Title, Text, Paragraph } = Typography
 type Row = Record<string, any>
 type Axis = { id: string; label: string; score: number | null; n: number; coverage: number; population: number; status: string; earned: number; possible: number; distribution: number[] }
-const noGroups: Row[] = []
 const noAxes: Axis[] = []
 const pages = [
-  ['overview', '班级概览', <DashboardOutlined />], ['agent', 'Agent 工作台', <ApartmentOutlined />],
+  ['overview', '班级诊断', <DashboardOutlined />], ['agent', 'Agent 工作台', <ApartmentOutlined />],
   ['import', '导入与清洗', <CloudUploadOutlined />],
   ['materials', '课程与资料', <BookOutlined />], ['student', '学生画像', <RadarChartOutlined />],
   ['drafts', '学习建议', <SendOutlined />], ['settings', '任务与设置', <SettingOutlined />],
@@ -37,86 +38,56 @@ const post = { method: 'POST' }
 const param = encodeURIComponent
 function query(values: Record<string, string>) { return '?' + new URLSearchParams(values).toString() }
 
-function ChartFrame({ kind, axes, groups = noGroups, compare, onSelect }: {
-  kind: 'heatmap' | 'radar'; axes: Axis[]; groups?: Row[]; compare?: Axis[]; onSelect: (a: Axis, group?: string) => void
+function StudentRadar({ axes, compare, onSelect }: {
+  axes: Axis[]; compare: Axis[]; onSelect: (axis: Axis) => void
 }) {
   const { token } = theme.useToken()
   const ref = useRef<HTMLDivElement>(null)
   const instance = useRef<ReturnType<typeof echarts.init>>(null)
-  const latest = useRef({ kind, axes, groups, onSelect })
-  useLayoutEffect(() => { latest.current = { kind, axes, groups, onSelect } })
+  const latest = useRef({ axes, onSelect })
+  useLayoutEffect(() => { latest.current = { axes, onSelect } })
   useEffect(() => {
     if (!ref.current) return
     const chart = echarts.init(ref.current)
     instance.current = chart
-    chart.on('click', (event: any) => {
-      const { kind, axes, groups, onSelect } = latest.current
-      if (kind === 'heatmap') {
-        if (!Array.isArray(event.value)) return
-        const [x, y] = event.value
-        const group = groups[y]
-        const axis = group?.axes.find((item: Axis) => item.id === axes[x]?.id)
-        if (axis) onSelect(axis, group.group)
-      } else {
-        const axis = axes.find(item => item.label === event.name)
-        if (axis) onSelect(axis)
-      }
+    chart.on('click', event => {
+      const axis = latest.current.axes.find(item => item.label === event.name)
+      if (axis) latest.current.onSelect(axis)
     })
     const observer = new ResizeObserver(() => chart.resize())
     observer.observe(ref.current)
     return () => { observer.disconnect(); chart.dispose(); instance.current = null }
   }, [])
   useEffect(() => {
-    const chart = instance.current
-    if (!chart) return
-    if (kind === 'heatmap') {
-      chart.setOption({ animation: false, textStyle: { color: token.colorText, fontFamily: token.fontFamily },
-        grid: { top: 18, left: 60, right: 15, bottom: 62 },
-        xAxis: { type: 'category', data: axes.map(a => a.id), axisLabel: { interval: 0 } },
-        yAxis: { type: 'category', data: groups.map(g => g.group) },
-        tooltip: { formatter: (p: any) => {
-          const [x, y] = p.value
-          const a = groups[y].axes.find((item: Axis) => item.id === axes[x].id)
-          return axes[x].id + ' · ' + (a ? a.status + '<br>覆盖 ' + a.coverage + '/' + a.population + ' 人' : '无数据')
-        } },
-        visualMap: { orient: 'horizontal', left: 'center', bottom: 0, min: 0, max: 100, text: ['100%', '0%'], inRange: { color: ['#fff2d2', '#a9ded3', token.colorPrimary] } },
-        series: [{ type: 'heatmap', label: { show: true, color: '#162e2a', formatter: (p: any) => p.value[2] < 0 ? '—' : p.value[2] + '%' },
-          itemStyle: { borderWidth: 4, borderColor: token.colorBgContainer, borderRadius: 8 },
-          data: groups.flatMap((g, y) => {
-            const byId = new Map<string, Axis>(g.axes.map((axis: Axis) => [axis.id, axis]))
-            return axes.map((axis, x) => {
-              const item = byId.get(axis.id)
-              if (item?.score == null) return { value: [x, y, -1], itemStyle: { color: token.colorFillSecondary } }
-              return item.coverage * 2 < item.population
-                ? { value: [x, y, item.score], label: { formatter: item.score + '%*' } }
-                : [x, y, item.score]
-            })
-          }) }] }, { notMerge: true })
-    } else {
-      const complete = axes.every(a => a.score !== null)
-      chart.setOption({ animation: !matchMedia('(prefers-reduced-motion: reduce)').matches, tooltip: {}, radar: { indicator: axes.map(a => ({ name: a.label, max: 100 })),
-        radius: '60%', triggerEvent: true, axisName: { color: token.colorTextSecondary, width: 100, overflow: 'break' },
-        splitArea: { areaStyle: { color: ['#f4f9f7', '#fff'] } } },
-        series: [{ type: 'radar', lineStyle: { width: complete ? 2 : 0 }, symbolSize: 8,
-          data: [{ name: '学生', value: axes.map(a => a.score ?? NaN), itemStyle: { color: token.colorPrimary },
-            areaStyle: { opacity: complete ? 0.18 : 0 } },
-            ...(compare?.every(a => a.score !== null) ? [{ name: '班级参照', value: compare.map(a => a.score),
-              itemStyle: { color: '#be8552' }, lineStyle: { width: 1, type: 'dashed' } }] : [])] }] })
-    }
-  }, [axes, groups, compare, kind, token])
-  return <div className={'chart ' + kind} ref={ref} role="img" aria-label={kind === 'radar' ? '学生学习表现雷达图' : '班级指标热力图'} />
+    const complete = axes.every(axis => axis.score != null)
+    const comparison = new Map(compare.map(axis => [axis.id, axis.score]))
+    const previous = axes.map(axis => comparison.get(axis.id))
+    instance.current?.setOption({
+      animation: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      tooltip: {},
+      radar: { indicator: axes.map(axis => ({ name: axis.label, max: 100 })), radius: '60%',
+        triggerEvent: true, axisName: { color: token.colorTextSecondary, width: 100, overflow: 'break' } },
+      series: [{ type: 'radar', lineStyle: { width: complete ? 2 : 0 }, symbolSize: 8,
+        data: [{ name: '学生', value: axes.map(axis => axis.score ?? NaN), itemStyle: { color: token.colorPrimary },
+          areaStyle: { opacity: complete ? 0.18 : 0 } },
+          ...(previous.length && previous.every(value => value != null) ? [{ name: '班级参照', value: previous,
+            itemStyle: { color: '#9b6332' }, lineStyle: { width: 1, type: 'dashed' } }] : [])] }],
+    }, { notMerge: true })
+  }, [axes, compare, token])
+  return <div className="chart radar" ref={ref} role="img" aria-label="学生学习表现雷达图" />
 }
-function Comparison({ axes, compare }: { axes: Axis[]; compare: Axis[] }) {
+
+function Comparison({ axes, compare, select }: { axes: Axis[]; compare: Axis[]; select: (axis: Axis) => void }) {
   const byId = new Map(compare.map(axis => [axis.id, axis]))
   if (!axes.length) return null
   return <section className="spaced" aria-label="学生与班级对照">
     <Title level={5}>学生与班级对照</Title>
-    <Text type="secondary">青色圆点为学生，棕色方点为班级 · 0–100%</Text>
+    <Text type="secondary">实心圆为学生，空心菱形为班级 · 0–100%</Text>
     {axes.map(axis => {
       const other = byId.get(axis.id)
       const delta = axis.score == null || other?.score == null ? null : Number((axis.score - other.score).toFixed(1))
-      return <div key={axis.id} className="comparison-row">
-        <Text strong>{axis.label}</Text>
+      return <div key={axis.id} id={'indicator-' + axis.id} className="comparison-row">
+        <Button type="link" className="comparison-label" onClick={() => select(axis)}>{axis.label}</Button>
         <div className="dot-track" aria-hidden="true">
           {axis.score != null && <i style={{ left: axis.score + '%' }} />}
           {other?.score != null && <i className="class-dot" style={{ left: other.score + '%' }} />}
@@ -127,25 +98,12 @@ function Comparison({ axes, compare }: { axes: Axis[]; compare: Axis[] }) {
   </section>
 }
 
-function Distribution({ values }: { values: number[] }) {
-  const bins = [0, 20, 40, 60, 80].map(start => ({
-    label: start + (start === 80 ? '–100%' : '–<' + (start + 20) + '%'),
-    count: values.filter(value => value >= start && (start === 80 || value < start + 20)).length,
-  }))
-  return <section className="spaced" aria-label="学生得分率分布">
-    <Title level={5}>学生得分率分布 · {values.length} 人</Title>
-    {values.length === 0 ? <Text type="secondary">无有效评分</Text> : bins.map(bin =>
-      <div className="distribution-row" key={bin.label}>
-        <span>{bin.label}</span><meter min={0} max={values.length} value={bin.count} aria-label={bin.label} /><span>{bin.count} 人</span>
-      </div>)}
-  </section>
-}
-
 function SourcePage({ citation }: { citation: Row }) {
   const [size, setSize] = useState({ w: 0, h: 0 })
   const [original, setOriginal] = useState(false)
   const bbox: number[] | undefined = citation.bbox
   const locator = original ? citation.locator.replace(' · 矫正图', '') : citation.locator
+  if (!bbox && citation.title === '赛题题库与学习卡') return null
   return <>
     {citation.locator.endsWith(' · 矫正图') && <Button onClick={() => { setOriginal(!original); setSize({w:0,h:0}) }}>{original ? '查看矫正图' : '查看原图'}</Button>}
     <div className="source-preview">
@@ -181,6 +139,10 @@ function Workbench() {
   const [corrected, setCorrected] = useState('{}')
   const [mapping, setMapping] = useState('{}')
   const [selected, setSelected] = useState<Row>()
+  const [answerId, setAnswerId] = useState('')
+  const [studentView, setStudentView] = useState<'指标对照' | '整体轮廓'>('指标对照')
+  const [profileSnapshot, setProfileSnapshot] = useState('')
+  const [focusIndicator, setFocusIndicator] = useState('')
   const [citation, setCitation] = useState<Row>()
   const [doc, setDoc] = useState<Row>()
   const [changes, setChanges] = useState<Record<string, string>>({})
@@ -189,6 +151,10 @@ function Workbench() {
   const [draft, setDraft] = useState<Row>()
   const [binding, setBinding] = useState({ label: '', webhook: '', secret: '' })
   const [preview, setPreview] = useState<Row>()
+  const practicePreview = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (preview) practicePreview.current?.scrollIntoView({ block: 'nearest' })
+  }, [preview])
   const [busy, setBusy] = useState(false)
   const [classFilter, setClassFilter] = useState('')
   async function refresh() {
@@ -251,38 +217,57 @@ function Workbench() {
     return () => { active = false; clearInterval(timer) }
   }, [runId, page])
   const evidenceRequest = useRef(0)
-  useLayoutEffect(() => { evidenceRequest.current++ }, [student, node, page, report?.snapshot_id])
+  useLayoutEffect(() => { evidenceRequest.current++ }, [student, node, page, report?.snapshot_id, profileSnapshot])
   useEffect(() => {
     let active = true
-    void api('/profiles' + query({ student, node })).then(result => {
+    void api('/profiles' + query({ student, node, snapshot_id: page === 'student' ? profileSnapshot : '' })).then(result => {
       if (active) setData({ ...result, selectedStudent: student, selectedNode: node })
     }).catch(error => { if (active) message.error(error.message) })
     return () => { active = false }
-  }, [student, node, report?.snapshot_id])
+  }, [student, node, report?.snapshot_id, page, profileSnapshot])
+  useEffect(() => {
+    if (page !== 'student' || !focusIndicator || data.selectedStudent !== student || data.selectedNode !== node || data.snapshot_id !== profileSnapshot) return
+    const indicator = document.getElementById('indicator-' + focusIndicator)
+    indicator?.scrollIntoView({ block: 'nearest' })
+    indicator?.querySelector('button')?.focus({ preventScroll: true })
+    setFocusIndicator('')
+  }, [page, focusIndicator, data, student, node, profileSnapshot])
   const cleaningAudit = report?.last_agent_review
   const groups: Row[] = data.groups || []
   const students: Row[] = data.students || []
   const currentClass = students.find(s => s.学生编号 === student)?.模拟班级编号
   const current: Row = data.profile || {}
   const axes: Axis[] = useMemo(() => topic
-    ? (current.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : current.topics || noAxes,
+    ? (current.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : current.axes || noAxes,
   [current.axes, current.topics, topic])
   const comparison: Row = groups.find(g => g.group === currentClass) || {}
   const compare: Axis[] = useMemo(() => topic
-    ? (comparison.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : comparison.topics || noAxes,
+    ? (comparison.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : comparison.axes || noAxes,
   [comparison.axes, comparison.topics, topic])
-  const chooseEvidence = async (axis: Axis, group?: string) => {
-    if (!data.snapshot_id || data.selectedNode !== node || (!group && data.selectedStudent !== student)) return
-    if (report?.snapshot_id && report.snapshot_id !== data.snapshot_id) return
+  const readEvidence = async (target: DiagnosticSelection & { student: string; axis: DiagnosticAxis }) => {
     const request = ++evidenceRequest.current
-    const target = { indicator: axis.id, student: group ? '' : student, group: group || '', node, snapshot_id: data.snapshot_id }
+    const { axis, ...params } = target
     try {
-      const rows = await api('/profiles/evidence' + query(target))
-      if (request === evidenceRequest.current) setSelected({ axis, rows, ...target })
+      const rows = await api('/profiles/evidence' + query(params))
+      if (request === evidenceRequest.current) {
+        setAnswerId(rows[0]?.作答事件编号 || '')
+        setSelected({ axis, rows, ...params })
+      }
     } catch (error) {
       if (request === evidenceRequest.current) message.error((error as Error).message)
     }
   }
+  const chooseEvidence = (axis: Axis, group?: string) => {
+    if (!data.snapshot_id || data.selectedNode !== node || data.selectedStudent !== student) return
+    void readEvidence({ axis, indicator: axis.id, student: group ? '' : student, group: group || '', node, snapshot_id: data.snapshot_id })
+  }
+  const openReplay = () => perform(async () => setReplay(await api<CaseData>('/agent/cases/q015')))
+  const selectedAnswer: Row | undefined = selected?.rows.find((row: Row) => row.作答事件编号 === answerId)
+  const linkedDraft = selectedAnswer && drafts.find(d => d.snapshot_id === selected?.snapshot_id
+    && d.student === selectedAnswer.学生编号 && d.anchor_event === answerId && d.approved)
+    || (selectedAnswer && drafts.find(d => d.snapshot_id === selected?.snapshot_id && d.student === selectedAnswer.学生编号 && d.anchor_event === answerId))
+  const teachingSource = linkedDraft?.citations?.find((item: Row) => item.locator === selectedAnswer?.材料编号)
+    || linkedDraft?.citations?.find((item: Row) => String(item.locator).startsWith('L'))
   const importFiles = () => perform(async () => {
     const payload = new FormData()
     files.forEach(f => payload.append('files', f))
@@ -291,9 +276,10 @@ function Workbench() {
     openRun(result.run_id)
   })
   const openDoc = (id: string) => perform(async () => { setDoc(await api('/materials/' + id)); setChanges({}) })
-  const launch = (target: Row) => perform(async () => {
+  const launch = (target: Row, onLaunched?: () => void) => perform(async () => {
     const result = await api('/agent/runs', json('POST', { node, snapshot_id: data.snapshot_id, ...target }))
     openRun(result.run_id)
+    onLaunched?.()
   })
   const openDraft = (d: Row) => {
     setDraft({ ...d, message: d.message ?? d.follow_up })
@@ -318,10 +304,11 @@ function Workbench() {
     if (saved.approved) setPreview(await api('/recommendations/' + saved.id + '/preview'))
     else if (saved.review_run_id) { setDraft(undefined); openRun(saved.review_run_id) }
   })
+  const activeSnapshot = report?.snapshot_id || ''
   const nodeChoice = <Select aria-label="测验节点" value={node} style={{ width: 142 }} onChange={setNode}
     options={[{ value: '', label: '全部测验' }, ...(data.nodes || []).map((v: string) => ({ value: v, label: v }))]} />
   const studentChoice = <Select aria-label="选择学生" placeholder="选择学生" value={student || undefined} style={{ width: 170 }}
-    showSearch onChange={v => { setStudent(v); setTopic('') }}
+    showSearch onChange={v => { setStudent(v); setProfileSnapshot(''); setTopic('') }}
     options={students.filter(s => !classFilter || s.模拟班级编号 === classFilter).map(s => ({ value: s.学生编号, label: s.学生编号 + ' · ' + s.模拟班级编号 }))} />
   function axisTable(source: Axis[], group?: string) {
     return <Table rowKey="id" size="small" pagination={false} dataSource={source} columns={[
@@ -336,24 +323,20 @@ function Workbench() {
       <Menu selectedKeys={[page]} mode="inline" items={pages.map(([key, label, icon]) => ({ key, label, icon }))} onClick={e => goTo(e.key)} />
     </Layout.Sider>
     <Layout.Content className="content">
-      <header className="page-head"><Title level={2}>{pages.find(p => p[0] === page)?.[1]}</Title>
-        <Space><Button href="/api/export?format=json">导出 JSON</Button><Button href="/api/export?format=csv">导出 CSV</Button></Space></header>
-      {page === 'overview' && <>
-        <div className="hero"><Title level={3}>七年级数学学情</Title>
-          <Space wrap><Button onClick={() => goTo('import')}>导入学情</Button><Button type="primary" onClick={() => goTo('agent')}>打开 Agent 工作台</Button></Space></div>
-        <div className="metric-grid"><Card><Statistic title="学生" value={students.length} /></Card><Card><Statistic title="班级" value={groups.length} /></Card><Card><Statistic title="测验节点" value={data.nodes?.length || 0} /></Card><Card><Statistic title="有效作答" value={report?.valid_scored || 0} /></Card></div>
-        <Card title="班级指标对照" extra={nodeChoice}>
-          {groups[0]?.axes.length ? <><div className="heatmap-scroll"><ChartFrame kind="heatmap" axes={groups[0].axes} groups={groups} onSelect={chooseEvidence} /></div>
-            <Text type="secondary">— 无有效评分或无数据 · * 覆盖率低于 50%</Text>
-            <details><summary>查看得分率与覆盖口径</summary>得分率取各有效作答学生的得分率平均值。覆盖为有有效作答的人数／应覆盖人数。</details>
-          </> : <Empty description="导入逐题作答后即可查看班级画像" />}
-        </Card>
-        {groups.map(g => <Card key={g.group} title={g.group} extra={<Button disabled={!g.axes.length} onClick={() => launch({ group: g.group })}>生成班级建议</Button>}>{axisTable(g.axes, g.group)}</Card>)}
-      </>}
+      {page !== 'overview' && <header className="page-head"><Title level={2}>{pages.find(p => p[0] === page)?.[1]}</Title>
+        <Space><Button href="/api/export?format=json">导出 JSON</Button><Button href="/api/export?format=csv">导出 CSV</Button></Space></header>}
+      <Diagnostics active={page === 'overview'} data={data.groups && (!activeSnapshot || activeSnapshot === data.snapshot_id) ? data as Profile : undefined}
+        count={students.length} attempts={report?.valid_scored} busy={busy} api={api}
+        openReplay={openReplay} openImport={() => goTo('import')} openEvidence={target => void readEvidence(target)}
+        openStudent={(student, node, snapshot, indicator) => {
+          setClassFilter(''); setStudent(student); setNode(node); setProfileSnapshot(snapshot); setTopic('')
+          setStudentView('指标对照'); setFocusIndicator(indicator); goTo('student')
+        }}
+        launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
       {page === 'agent' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
         error={runError} loading={busy} legacy={!!report?.legacy_pending}
         open={openRun} openImport={() => goTo('import')}
-        openReplay={() => perform(async () => setReplay(await api<CaseData>('/agent/cases/q015')))}
+        openReplay={openReplay}
         openDraft={key => { const found = drafts.find(d => d.id === key); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
         migrate={() => perform(async () => { openRun((await api('/imports/migrate', post)).run_id) })}
         retry={() => perform(async () => { setRunDetail(await api('/jobs/' + runId + '/retry', post)) })}
@@ -408,14 +391,14 @@ function Workbench() {
       </>}
       {page === 'student' && <>
         <Card title="学生学习表现" extra={<Space wrap><Select allowClear placeholder="筛选班级" onChange={v => { setClassFilter(v || ''); setStudent('') }} options={groups.map(g => ({ value: g.group }))} />{studentChoice}{nodeChoice}</Space>}>
-          {!student ? <Empty description="选择学生查看雷达图和证据" /> : <>
+          {!student ? <Empty description="选择学生查看指标对照和作答" /> : <>
             <Space wrap><Button type={!topic ? 'primary' : 'default'} onClick={() => setTopic('')}>主题总览</Button>
               {(current.topics || []).map((a: Axis) => <Button key={a.id} type={topic === a.id ? 'primary' : 'default'} onClick={() => setTopic(a.id)}>{a.label}</Button>)}</Space>
-            {!!axes.length && <ChartFrame kind="radar" axes={axes} compare={compare} onSelect={chooseEvidence} />}
-            <Comparison axes={axes} compare={compare} />
-            {axisTable(axes)}
+            <div className="spaced"><Segmented aria-label="学生画像视图" options={['指标对照', '整体轮廓']} value={studentView} onChange={setStudentView} /></div>
+            {studentView === '整体轮廓' ? <>{!!axes.length && <StudentRadar axes={topic ? axes : current.topics || noAxes} compare={topic ? compare : comparison.topics || noAxes} onSelect={chooseEvidence} />}{axisTable(axes)}</>
+              : <Comparison axes={axes} compare={compare} select={chooseEvidence} />}
             {!!current.totals?.length && <Table rowKey="节点编号" dataSource={current.totals} pagination={false} columns={[{ title: '测验', dataIndex: '节点编号' }, { title: '总分', dataIndex: '测验总分' }]} />}
-            <Space className="spaced"><Button type="primary" loading={busy} onClick={() => launch({ student })}>生成学习建议</Button><Button loading={busy} onClick={() => launch({ student, variant: true })}>生成建议与变式题</Button></Space>
+            <Space className="spaced"><Button type="primary" loading={busy} onClick={() => launch({ student, snapshot_id: data.snapshot_id })}>生成学习建议</Button><Button loading={busy} onClick={() => launch({ student, variant: true, snapshot_id: data.snapshot_id })}>生成建议与变式题</Button></Space>
           </>}
         </Card>
       </>}
@@ -434,7 +417,7 @@ function Workbench() {
           { title: '错误', dataIndex: 'error' }, { title: '操作', render: (_,j) => j.state === 'failed' ? <Button onClick={() => perform(() => api('/jobs/' + j.id + '/retry', post))}>重试</Button> : null }]} /></Card>
       </>}
     </Layout.Content>
-    <Drawer open={!!replay} title="Q015 案例回放" size={850} onClose={() => setReplay(undefined)}
+    <Drawer open={!!replay} title="演示串讲 · Q015" size="min(1100px, 100vw)" onClose={() => setReplay(undefined)}
       styles={{ body: { display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}>
       {replay && <CaseReplay data={replay} openCitation={setCitation} />}
     </Drawer>
@@ -447,20 +430,24 @@ function Workbench() {
           setCorrection(undefined); openRun(result.run_id)
         })}>保存修订</Button></>}
     </Drawer>
-    <Drawer open={!!selected} title={selected?.axis.label} size={700} onClose={() => { evidenceRequest.current++; setSelected(undefined) }}>
-      {selected && <><Space wrap><Tag>{selected.group || selected.student}</Tag><Tag>{selected.node || '全部测验'}</Tag>
-        <Text>覆盖 {selected.axis.coverage}/{selected.axis.population} 人 · 有效作答 {selected.rows.length} 条</Text></Space>
+    <Drawer open={!!selected} title="作答证据" size="min(980px, 100vw)" onClose={() => { evidenceRequest.current++; setSelected(undefined) }}>
+      {selected && <><Space wrap><Tag>{selected.student || selected.group}</Tag><Tag>{selected.node || '全部测验'}</Tag>
+        <Text>{selected.axis.label} · {selected.rows.length} 条作答</Text></Space>
         <details><summary>数据快照</summary><code>{selected.snapshot_id}</code></details>
-        <Distribution values={selected.axis.distribution} />
-        {selected.rows.map((r: Row) => <Card size="small" className="spaced" key={r.作答事件编号}
-          title={r.学生编号 + ' · ' + r.材料编号 + ' · ' + r.得分 + '/' + r.满分}
-          extra={<Button size="small" loading={busy} onClick={() => {
-            void launch({ student: r.学生编号, node: r.节点编号, snapshot_id: selected.snapshot_id, anchor_event: r.作答事件编号 })
-            setSelected(undefined)
-          }}>基于本题生成建议</Button>}>
-          <Paragraph>{r.题目.题干或内容}</Paragraph><Paragraph className="preserve">{r.解答过程}</Paragraph>
-          <Paragraph>最终填写：{r.学生最终作答 || '—'}</Paragraph><Text type="secondary">{r.评分点得分} · {r.来源.source}:{r.来源.line}</Text>
-        </Card>)}</>}
+        {selected.rows.length > 1 && <Select className="spaced" aria-label="选择作答" value={answerId} onChange={setAnswerId}
+          options={selected.rows.map((row: Row) => ({ value: row.作答事件编号, label: row.节点编号 + ' · ' + row.材料编号 + ' · ' + row.得分 + '/' + row.满分 }))} />}
+        {selectedAnswer ? <div className="spaced">
+          <AnswerEvidence key={answerId} answer={selectedAnswer as Parameters<typeof AnswerEvidence>[0]['answer']} />
+          <Space wrap className="spaced">
+            <Button type="primary" loading={busy} onClick={() => {
+              if (linkedDraft) openDraft(linkedDraft)
+              else void launch({ student: selectedAnswer.学生编号, node: selectedAnswer.节点编号, snapshot_id: selected.snapshot_id, anchor_event: answerId },
+                () => setSelected(undefined))
+            }}>{linkedDraft ? '查看对应练习' : '基于本题生成建议'}</Button>
+            {teachingSource && <Button onClick={() => setCitation(teachingSource)}>查看资料原文</Button>}
+          </Space>
+        </div> : <Empty description={selected.axis.status} />}
+      </>}
     </Drawer>
     <Drawer open={!!doc} title={doc?.name} size={850} onClose={() => setDoc(undefined)}>
       {doc && <><Space><Tag>{doc.state}</Tag><Button disabled={!['review','published'].includes(doc.state) || !Object.keys(changes).length} onClick={() => perform(async () => {
@@ -476,7 +463,16 @@ function Workbench() {
     <Drawer open={!!citation} title={citation?.title + ' · ' + citation?.locator} size={730} onClose={() => setCitation(undefined)}>
       {citation && <><Paragraph className="preserve">{citation.text}</Paragraph><SourcePage key={citation.id} citation={citation} /></>}
     </Drawer>
-    <Drawer open={!!draft} title={'学习建议 · ' + (draft?.student || draft?.group || '')} size={750} onClose={() => setDraft(undefined)}>
+    <Drawer open={!!draft} title={'教学安排 · ' + (draft?.student || draft?.group || '')} size="min(860px, 100vw)" onClose={() => setDraft(undefined)}
+      footer={draft && <Space wrap className="draft-controls">
+        {changed ? <Button type="primary" loading={busy} onClick={() => saveDraft(false)}>保存修订并重新终审</Button>
+          : draft.approved ? <Button type="primary" loading={busy} onClick={() => perform(async () => setPreview(await api('/recommendations/' + draft.id + '/preview')))}>查看学生练习单</Button>
+          : <Button type="primary" loading={busy} disabled={currentReview?.decision !== 'pass'} onClick={() => saveDraft(true)}>确认并预览</Button>}
+        {(savedDraft?.review_run_id || draft.run_id) && <Button onClick={() => {
+          openRun(savedDraft?.review_run_id || draft.run_id); setDraft(undefined); setSelected(undefined)
+        }}>查看运行</Button>}
+        {!changed && !draft.approved && currentReview?.decision !== 'pass' && <Text type="secondary">当前修订需通过终审</Text>}
+      </Space>}>
       {draft && <><Title level={5}>学情与依据</Title>
         <Paragraph editable={draft.snapshot_id ? { onChange: observation => { setDraft({ ...draft, observation, approved: false }); setPreview(undefined) } } : false}>{draft.observation}</Paragraph>
         <Paragraph editable={draft.snapshot_id ? { onChange: uncertainty => { setDraft({ ...draft, uncertainty, approved: false }); setPreview(undefined) } } : false}>{draft.uncertainty}</Paragraph>
@@ -493,11 +489,11 @@ function Workbench() {
           </Card>)}</> : draft.citations.map((c: Row) =>
           <Button key={c.id} type="link" onClick={() => setCitation(c)}>{c.title} · {c.locator}</Button>)}
         <Title level={5}>练习顺序</Title>
-        {draft.exercises.map((q: Row, index: number) => <Card size="small" className="spaced" key={q.question_id} title={q.question_id} extra={<Space>
+        {draft.exercises.map((q: Row, index: number) => <Card size="small" className="spaced" key={q.question_id} title={(index + 1) + ' · ' + q.question_id} extra={<Space>
           {[-1, 1].map(delta => <Button key={delta} size="small" disabled={index + delta < 0 || index + delta >= draft.exercises.length} onClick={() => {
             const items = [...draft.exercises]; const item = items.splice(index, 1)[0]; items.splice(index + delta, 0, item); setDraft({ ...draft, exercises: items, approved: false }); setPreview(undefined)
           }}>{delta < 0 ? '上移' : '下移'}</Button>)}</Space>}>
-          <Paragraph>{draft.questions[q.question_id]?.题干或内容}</Paragraph><Text>{q.purpose}</Text>
+          <Paragraph className="practice-question">{draft.questions[q.question_id]?.题干或内容}</Paragraph>{q.purpose && <Text type="secondary">{q.purpose}</Text>}
           {!!q.evidence_ids?.length && <details className="spaced"><summary>查看练习依据</summary>
             {draft.evidence.filter((row: Row) => q.evidence_ids.includes(row.id)).map((row: Row) =>
               <Paragraph key={row.id}>{row.材料编号} · {row.得分}/{row.满分} · {row.评分点得分}<br />{row.解答过程}</Paragraph>)}
@@ -515,15 +511,7 @@ function Workbench() {
         {currentReview && <Card size="small" className="spaced" title="模型终审"><ReviewPanel review={currentReview}
           canOpenRef={ref => draft.citations.some((item: Row) => item.id === ref)}
           openRef={ref => setCitation(draft.citations.find((item: Row) => item.id === ref))} /></Card>}
-        <Space wrap className="spaced">
-          {draft.snapshot_id && <Button loading={busy} disabled={!changed} onClick={() => saveDraft(false)}>保存修订并重新终审</Button>}
-          <Button type="primary" loading={busy} disabled={!draft.snapshot_id || changed || currentReview?.decision !== 'pass'}
-            onClick={() => saveDraft(true)}>确认并预览卡片</Button>
-          {(savedDraft?.review_run_id || draft.run_id) && <Button onClick={() => {
-            openRun(savedDraft?.review_run_id || draft.run_id); setDraft(undefined)
-          }}>查看运行</Button>}
-        </Space>
-        {preview && <Card className="spaced" size="small" title={preview.group || '尚未绑定收件群'}><Paragraph className="preserve">{preview.text}</Paragraph></Card>}
+        {preview && <div ref={practicePreview}><Card className="spaced" size="small" title="学生练习单"><Paragraph className="preserve">{preview.text}</Paragraph></Card></div>}
         {draft.student && <details className="spaced"><summary>配置学生专属飞书群</summary><Space orientation="vertical" className="wide">
           <Input placeholder="群标签（请与学生确认）" value={binding.label} onChange={e => setBinding({ ...binding, label: e.target.value })} />
           <Input.Password placeholder="Webhook 地址" value={binding.webhook} onChange={e => setBinding({ ...binding, webhook: e.target.value })} />
@@ -542,7 +530,7 @@ function Workbench() {
 }
 
 createRoot(document.getElementById('root')!).render(<ConfigProvider locale={zhCN} theme={{ token: {
-  colorPrimary:'#167765', colorBgLayout:'#f4f7f5', colorText:'#162f29', borderRadius:12,
+  colorPrimary:'#176B59', colorBgLayout:'#F5F6F2', colorText:'#172D28', borderRadius:8, controlHeight:36,
   fontFamily:'Inter, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif', fontSize:14,
   motion: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
 }, components: { Menu: { itemSelectedBg:'#e3f2eb', itemSelectedColor:'#145b4c' } } }}><App><Workbench /></App></ConfigProvider>)
