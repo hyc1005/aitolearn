@@ -1,0 +1,17 @@
+# Windows x64 and CPython 3.12, verified with setup.ps1 -SkipOcr -KeywordOnly.
+fastapi==0.165.0
+uvicorn==0.54.0
+pydantic==2.14.4
+python-multipart==0.0.34
+openpyxl==3.1.5
+python-docx==1.2.0
+pypdf==6.21.4
+pypdfium2==5.15.2
+Pillow==12.3.0
+jieba==0.42.1
+numpy==2.5.5
+smolagents[openai]==1.26.0
+openai==3.57.0
+httpx==0.28.1
+sympy==1.14.0
+keyring==25.7.0

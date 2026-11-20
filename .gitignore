@@ -1,0 +1,9 @@
+goapi.txt
+.env
+.venv*/
+var/
+node_modules/
+dist/
+__pycache__/
+.pytest_cache/
+ori_data/
