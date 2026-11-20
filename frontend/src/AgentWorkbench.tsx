@@ -1,6 +1,6 @@
 import React from 'react'
 import { Alert, Button, Card, Empty, Space, Steps, Table, Tag, Typography } from 'antd'
-import { CleaningCounts } from './CleaningCounts'
+import { CleaningCounts, issueFilters } from './CleaningCounts'
 
 type Row = Record<string, any>
 
@@ -26,16 +26,10 @@ export function runStatus(run: Row) {
   return stageNames[run.stage] || '处理中'
 }
 
-export function ReviewPanel({ review, openRef, canOpenRef }: {
-  review: Row; openRef?: (ref: string) => void; canOpenRef?: (ref: string) => boolean
+export function ReviewPanel({ review, openRef, canOpenRef, collapseDetails }: {
+  review: Row; openRef?: (ref: string) => void; canOpenRef?: (ref: string) => boolean; collapseDetails?: boolean
 }) {
-  return <>
-    <Space wrap>
-      {review.model && <Tag>{review.model}</Tag>}
-      {review.decision && <Tag color={['pass', 'ready'].includes(review.decision) ? 'green' : 'orange'}>{reviewNames[review.decision]}</Tag>}
-      {Object.entries(review.checks || {}).map(([key, value]) =>
-        <Tag key={key} color={value === 'pass' ? 'green' : 'orange'}>{checks[key]} · {value === 'pass' ? '通过' : '退回'}</Tag>)}
-    </Space>
+  const details = <>
     <Typography.Paragraph className="spaced preserve">{review.summary}</Typography.Paragraph>
     {(review.findings || review.claims || []).map((finding: Row, index: number) =>
       <div key={index} className="spaced">
@@ -44,6 +38,15 @@ export function ReviewPanel({ review, openRef, canOpenRef }: {
           ? <Button key={ref} size="small" type="link" onClick={() => openRef(ref)}>{ref}</Button>
           : <Tag key={ref}>{ref}</Tag>)}</Space>
       </div>)}
+  </>
+  return <>
+    <Space wrap>
+      {review.model && <Tag>{review.model}</Tag>}
+      {review.decision && <Tag color={['pass', 'ready'].includes(review.decision) ? 'green' : 'orange'}>{reviewNames[review.decision]}</Tag>}
+      {Object.entries(review.checks || {}).map(([key, value]) =>
+        <Tag key={key} color={value === 'pass' ? 'green' : 'orange'}>{checks[key]} · {value === 'pass' ? '通过' : '退回'}</Tag>)}
+    </Space>
+    {collapseDetails ? <details className="spaced"><summary>查看模型检查意见</summary>{details}</details> : details}
   </>
 }
 
@@ -117,7 +120,7 @@ export default function AgentWorkbench(props: Props) {
       <Table<Row> size="small" rowKey="id" dataSource={report.issues} columns={[
         { title: '编号', dataIndex: 'id' }, { title: '文件与原始行', render: (_, row) => [row.source, row.sheet, '第 ' + row.line + ' 行'].filter(Boolean).join(' · ') },
         { title: '字段', dataIndex: 'field' }, { title: '原值', render: (_, row) => typeof row.original === 'object' ? <details><summary>展开</summary><pre className="preserve">{JSON.stringify(row.original, null, 2)}</pre></details> : row.original },
-        { title: '排除原因', dataIndex: 'reason' },
+        { title: '排除原因', dataIndex: 'reason', ...issueFilters(report.issues) },
       ]} />
       <details><summary>来源清单与快照编号</summary><pre className="preserve">
         {stages.python.snapshot_id + '\n' + JSON.stringify(run.manifest, null, 2)}
@@ -125,6 +128,7 @@ export default function AgentWorkbench(props: Props) {
     </Card>}
     {['clean_review', 'interpret', 'final_review'].map(stage => stages[stage] && <Card title={stageNames[stage]} key={stage}>
       <ReviewPanel review={stages[stage]} openRef={setActiveRef}
+        collapseDetails={stage === 'clean_review' && stages[stage].decision === 'ready'}
         canOpenRef={ref => stage !== 'final_review' &&
           !!(run.linked_evidence?.[ref] || report?.issues.some((r: Row) => r.id === ref))} />
       {stage === 'clean_review' && selectedIssue && <Alert className="spaced" message={selectedIssue.id + ' · ' + selectedIssue.reason}

@@ -10,6 +10,8 @@ with contextlib.redirect_stdout(sys.stderr):
 
     pipeline = PPStructureV3(device="cpu", use_doc_orientation_classify=True,
                              use_doc_unwarping=True, use_textline_orientation=True)
+    if sys.argv[1:] == ["--warmup"]:
+        sys.exit(0)
     results = list(pipeline.predict(sys.argv[1]))
 blocks = []
 for result in results:

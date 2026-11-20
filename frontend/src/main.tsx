@@ -5,7 +5,7 @@ import { ApartmentOutlined, BookOutlined, CloudUploadOutlined, DashboardOutlined
 import zhCN from 'antd/locale/zh_CN'
 import AgentWorkbench, { ReviewPanel, runNames } from './AgentWorkbench'
 import { CaseReplay, type CaseData } from './CaseReplay'
-import { CleaningCounts } from './CleaningCounts'
+import { CleaningCounts, issueFilters } from './CleaningCounts'
 import * as echarts from 'echarts/core'
 import { HeatmapChart, RadarChart } from 'echarts/charts'
 import { GridComponent, RadarComponent, TooltipComponent, VisualMapComponent } from 'echarts/components'
@@ -343,7 +343,7 @@ function Workbench() {
           <Space wrap><Button onClick={() => goTo('import')}>导入学情</Button><Button type="primary" onClick={() => goTo('agent')}>打开 Agent 工作台</Button></Space></div>
         <div className="metric-grid"><Card><Statistic title="学生" value={students.length} /></Card><Card><Statistic title="班级" value={groups.length} /></Card><Card><Statistic title="测验节点" value={data.nodes?.length || 0} /></Card><Card><Statistic title="有效作答" value={report?.valid_scored || 0} /></Card></div>
         <Card title="班级指标对照" extra={nodeChoice}>
-          {groups[0]?.axes.length ? <><ChartFrame kind="heatmap" axes={groups[0].axes} groups={groups} onSelect={chooseEvidence} />
+          {groups[0]?.axes.length ? <><div className="heatmap-scroll"><ChartFrame kind="heatmap" axes={groups[0].axes} groups={groups} onSelect={chooseEvidence} /></div>
             <Text type="secondary">— 无有效评分或无数据 · * 覆盖率低于 50%</Text>
             <details><summary>查看得分率与覆盖口径</summary>得分率取各有效作答学生的得分率平均值。覆盖为有有效作答的人数／应覆盖人数。</details>
           </> : <Empty description="导入逐题作答后即可查看班级画像" />}
@@ -373,15 +373,15 @@ function Workbench() {
         {report?.legacy_pending && <Alert type="info" message="已有历史批次，需迁移为快照后启用"
           action={<Button onClick={() => goTo('agent')}>打开 Agent 工作台</Button>} />}
         {report && <Card title="清洗计数"><CleaningCounts report={report as Parameters<typeof CleaningCounts>[0]['report']} /></Card>}
-        {cleaningAudit?.trace?.length > 0 && <Card title="Agent 清洗记录" extra={<Tag color="green">{cleaningAudit.model}</Tag>}>
-          <ReviewPanel review={cleaningAudit} />
+        {cleaningAudit?.trace?.length > 0 && <Card title="Agent 清洗记录">
+          <ReviewPanel review={cleaningAudit} collapseDetails={cleaningAudit.decision === 'ready'} />
           <details><summary>查看清洗工具输出</summary><pre className="preserve">{JSON.stringify(cleaningAudit.trace, null, 2)}</pre></details>
         </Card>}
         <Card title="已确认快照的清洗报告" extra={<Button href="/api/imports/issues.csv">下载异常 CSV</Button>}>
           <Space wrap>{Object.entries(report?.states || {}).map(([k, v]) => <Tag key={k}>{k} {String(v)}</Tag>)}</Space>
           <Table<Row> size="small" rowKey="id" dataSource={report?.issues || []}
             columns={[{ title: '文件', dataIndex: 'source' }, { title: '行', dataIndex: 'line' }, { title: '字段', dataIndex: 'field' },
-              { title: '原值', dataIndex: 'original', render: v => typeof v === 'string' ? v : JSON.stringify(v) }, { title: '原因', dataIndex: 'reason' },
+              { title: '原值', dataIndex: 'original', render: v => typeof v === 'string' ? v : JSON.stringify(v) }, { title: '原因', dataIndex: 'reason', ...issueFilters(report?.issues || []) },
               { title: '', render: (_, r) => (r.source.includes('作答记录') || r.sheet === '作答记录' || r.source.startsWith('教师修订-')) && <Button onClick={() => { setCorrection(r); setCorrected('{}') }}>修正</Button> }]} />
         </Card>
       </>}

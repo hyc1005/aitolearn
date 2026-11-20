@@ -33,6 +33,8 @@ if (!$SkipOcr) {
     Invoke-Native $ocr @('-m','pip','install','paddlepaddle==3.2.0','-i','https://www.paddlepaddle.org.cn/packages/stable/cpu/')
     Invoke-Native $ocr @('-m','pip','install','paddleocr[doc-parser]>=3.2,<4')
     Invoke-Native $ocr @('-c', 'import paddle; paddle.utils.run_check()')
+    Write-Output '正在准备 PaddleOCR 模型。首次下载可能需要几分钟。'
+    Invoke-Native $ocr @('-m','ocr_worker','--warmup')
 }
 Push-Location frontend
 try {

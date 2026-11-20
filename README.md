@@ -9,7 +9,7 @@ Windows 原生应用。前端使用 React、Ant Design 和 ECharts。后端使�
     .\scripts\setup.ps1
     .\scripts\start.ps1
 
-打开 http://127.0.0.1:8765。执行 `scripts/stop.ps1` 停止。遇到问题运行 `scripts/doctor.ps1`，查看 `var/api-error.log` 和 `var/worker-error.log`。处理旧版 DOC 需安装 LibreOffice，可通过 `SOFFICE` 指定可执行文件。首次 OCR 会初始化 Paddle 资源。
+打开 http://127.0.0.1:8765。执行 `scripts/stop.ps1` 停止。遇到问题运行 `scripts/doctor.ps1`，查看 `var/api-error.log` 和 `var/worker-error.log`。处理旧版 DOC 需安装 LibreOffice，可通过 `SOFFICE` 指定可执行文件。完整安装时，安装脚本会在处理第一份 OCR 文件前准备 PaddleOCR 模型。
 
 可用 `setup.ps1 -Python C:\path\python.exe` 指定解释器。仅验证数字 PDF、表格和 UI 时用 `setup.ps1 -SkipOcr -KeywordOnly`，并以 `start.ps1 -KeywordOnly` 启动。Windows x64 的 Python 3.12 关键词模式使用验收时固定的依赖版本。混合检索需要完整安装和首次向量模型下载。
 

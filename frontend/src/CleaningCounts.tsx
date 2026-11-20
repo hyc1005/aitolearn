@@ -1,4 +1,5 @@
 import { Descriptions } from 'antd'
+import type { Key } from 'react'
 
 type Report = {
   raw_attempts: number
@@ -6,6 +7,17 @@ type Report = {
   valid_scored: number
   states: Record<string, number>
   issues: unknown[]
+  input_attempts?: number
+  duplicate_attempts?: number
+}
+
+export function issueFilters(issues: { reason: string }[]) {
+  const counts = new Map<string, number>()
+  for (const { reason } of issues) counts.set(reason, (counts.get(reason) ?? 0) + 1)
+  return {
+    filters: [...counts].map(([reason, count]) => ({ text: reason + '（' + count + '）', value: reason })),
+    onFilter: (value: Key | boolean, row: Record<string, unknown>) => row.reason === value,
+  }
 }
 
 export function CleaningCounts({ report }: { report: Report }) {
@@ -20,8 +32,9 @@ export function CleaningCounts({ report }: { report: Report }) {
     <details className="spaced">
       <summary>查看计数口径</summary>
       <dl>
-        <dt>原始作答</dt><dd>读入的作答记录行数。</dd>
-        <dt>归并事件</dt><dd>按作答事件合并重复和修订后的数量。</dd>
+        <dt>原始作答</dt><dd>剔除内容完全相同的输入后保留的作答记录行数。
+          {!!report.duplicate_attempts && ' 本批输入 ' + report.input_attempts + ' 行，其中完全重复 ' + report.duplicate_attempts + ' 行。'}</dd>
+        <dt>归并事件</dt><dd>将同一作答事件的多条记录归并后的数量。</dd>
         <dt>已评分事件</dt><dd>归并事件中标记为已评分的数量。</dd>
         <dt>有效已评分事件</dt><dd>已评分事件中通过数据校验并计入画像的数量。</dd>
         <dt>异常明细</dt><dd>清洗报告记录的异常条数。</dd>

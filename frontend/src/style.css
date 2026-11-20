@@ -18,6 +18,8 @@ body{margin:0;background:#f4f7f5}
 .book:hover,.book:focus-visible{transform:translateY(-3px) rotate(-.8deg);box-shadow:0 8px 18px #1d534526}
 .book small{display:block;margin-top:10px}
 .chart{height:260px;width:100%}.chart.radar{height:390px}
+.heatmap-scroll{overflow-x:auto}
+.heatmap-scroll .chart{min-width:560px}
 .comparison-row{display:grid;gap:5px;padding:10px 0;border-bottom:1px solid #e3eae5}
 .dot-track{position:relative;height:24px;margin:0 8px;background:linear-gradient(#dce4e0,#dce4e0) center/100% 2px no-repeat}
 .dot-track i{position:absolute;top:2px;width:9px;height:9px;transform:translateX(-50%);border-radius:50%;background:#167765}
