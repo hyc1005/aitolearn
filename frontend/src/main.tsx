@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Menu, Select, Space, Table, Tag, Typography, theme } from 'antd'
-import { ApartmentOutlined, BookOutlined, CloudUploadOutlined, DashboardOutlined, RadarChartOutlined, SendOutlined, SettingOutlined } from '@ant-design/icons'
+import { ApartmentOutlined, ApiOutlined, BookOutlined, CloudUploadOutlined, DashboardOutlined, MessageOutlined, RadarChartOutlined, SendOutlined, SettingOutlined } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import AgentWorkbench, { ReviewPanel, runNames } from './AgentWorkbench'
 import { CaseReplay, type CaseData } from './CaseReplay'
@@ -9,6 +9,8 @@ import { CleaningCounts, issueFilters } from './CleaningCounts'
 import { Diagnostics, type DiagnosticSelection, type DiagnosticAxis, type Profile } from './Diagnostics'
 import { AnswerEvidence } from './AnswerEvidence'
 import { applyWorkbenchPalette, chartComparisonColor, workbenchTheme } from './workbenchTheme'
+import { LearningChat } from './LearningChat'
+import { ModelAccessPage, type ModelAccess } from './ModelAccess'
 import * as echarts from 'echarts/core'
 import { RadarChart } from 'echarts/charts'
 import { RadarComponent, TooltipComponent } from 'echarts/components'
@@ -21,11 +23,18 @@ type Row = Record<string, any>
 type Axis = { id: string; label: string; score: number | null; n: number; coverage: number; population: number; status: string; earned: number; possible: number; distribution: number[] }
 const noAxes: Axis[] = []
 const pages = [
-  ['overview', '班级诊断', <DashboardOutlined />], ['agent', 'Agent 工作台', <ApartmentOutlined />],
+  ['overview', '班级诊断', <DashboardOutlined />], ['chat', '学情对话', <MessageOutlined />],
+  ['models', '模型接入', <ApiOutlined />], ['agent', 'Agent 工作台', <ApartmentOutlined />],
   ['import', '导入与清洗', <CloudUploadOutlined />],
   ['materials', '课程与资料', <BookOutlined />], ['student', '学生画像', <RadarChartOutlined />],
   ['drafts', '学习建议', <SendOutlined />], ['settings', '任务与设置', <SettingOutlined />],
 ] as const
+function pageFromHash() {
+  if (location.hash.startsWith('#agent')) return 'agent'
+  if (location.hash === '#chat') return 'chat'
+  if (location.hash === '#models') return 'models'
+  return 'overview'
+}
 async function api<T = any>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch('/api' + path, options)
   if (!response.ok) {
@@ -80,7 +89,7 @@ function StudentRadar({ axes, compare, onSelect }: {
       media: [{ query: { maxWidth: 365 }, option: {
         radar: { radius: '41%', axisName: {
           lineHeight: 19,
-          formatter: (label: string) => label.match(/.{1,5}/gu)?.join('\n') || label,
+          formatter: (label: string) => label.match(/.{1,4}/gu)?.join('\n') || label,
         } },
       } }],
     }, { notMerge: true })
@@ -133,7 +142,7 @@ function SourcePage({ citation }: { citation: Row }) {
 }
 function Workbench() {
   const { message } = App.useApp()
-  const [page, setPage] = useState(location.hash.startsWith('#agent') ? 'agent' : 'overview')
+  const [page, setPage] = useState<string>(pageFromHash)
   const [runId, setRunId] = useState(() => /^#agent\/([a-f0-9]+)$/.exec(location.hash)?.[1] || '')
   const [runDetail, setRunDetail] = useState<Row>()
   const [runError, setRunError] = useState('')
@@ -148,6 +157,7 @@ function Workbench() {
   const [drafts, setDrafts] = useState<Row[]>([])
   const [deliveries, setDeliveries] = useState<Row[]>([])
   const [health, setHealth] = useState<Row>({})
+  const [modelAccess, setModelAccess] = useState<ModelAccess>()
   const [report, setReport] = useState<Row>()
   const [files, setFiles] = useState<File[]>([])
   const [correction, setCorrection] = useState<Row>()
@@ -178,8 +188,8 @@ function Workbench() {
     setReport(r); setMaterials(library); setCurriculum(map); setDrafts(list); setDeliveries(delivery); setHealth(status)
   }
   const goTo = (next: string) => {
-    if (next === 'agent') location.hash = 'agent'
-    else if (location.hash.startsWith('#agent')) history.replaceState(null, '', location.pathname + location.search)
+    if (next === 'agent' || next === 'chat' || next === 'models') location.hash = next
+    else if (location.hash) history.replaceState(null, '', location.pathname + location.search)
     setPage(next)
   }
   const openRun = (id: string) => {
@@ -191,6 +201,11 @@ function Workbench() {
     setBusy(true)
     try { await action() } catch (e) { message.error((e as Error).message) } finally { setBusy(false) }
   }
+  useEffect(() => {
+    if (page === 'chat' || page === 'models') {
+      void api<ModelAccess>('/models/settings').then(setModelAccess).catch(error => message.error(error.message))
+    }
+  }, [page])
   useEffect(() => {
     void refresh().catch(e => message.error(e.message))
     let signature = ''
@@ -209,7 +224,7 @@ function Workbench() {
   useEffect(() => {
     const onHashChange = () => {
       setRunId(/^#agent\/([a-f0-9]+)$/.exec(location.hash)?.[1] || '')
-      setPage(location.hash.startsWith('#agent') ? 'agent' : 'overview')
+      setPage(pageFromHash())
     }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
@@ -325,13 +340,13 @@ function Workbench() {
     showSearch onChange={v => { setStudent(v); setProfileSnapshot(''); setTopic('') }}
     options={students.filter(s => !classFilter || s.模拟班级编号 === classFilter).map(s => ({ value: s.学生编号, label: s.学生编号 + ' · ' + s.模拟班级编号 }))} />
   return <Layout className="shell">
-    <Layout.Sider width={200} className="sidebar">
+    <Layout.Sider width={216} className="sidebar">
       <div className="brand"><span className="brand-symbol"><ApartmentOutlined /></span><div>智慧学伴<small>教师工作台</small></div></div>
       <Menu theme="dark" selectedKeys={[page]} mode="inline" items={pages.map(([key, label, icon]) => ({ key, label, icon }))} onClick={e => goTo(e.key)} />
     </Layout.Sider>
     <Layout.Content className="content">
       {page !== 'overview' && <header className="page-head"><Title level={2}>{pages.find(p => p[0] === page)?.[1]}</Title>
-        <Space><Button href="/api/export?format=json">导出 JSON</Button><Button href="/api/export?format=csv">导出 CSV</Button></Space></header>}
+        {page !== 'chat' && page !== 'models' && <Space><Button href="/api/export?format=json">导出 JSON</Button><Button href="/api/export?format=csv">导出 CSV</Button></Space>}</header>}
       <Diagnostics active={page === 'overview'} data={data.groups && (!activeSnapshot || activeSnapshot === data.snapshot_id) ? data as Profile : undefined}
         count={students.length} attempts={report?.valid_scored} busy={busy} api={api}
         openReplay={openReplay} openImport={() => goTo('import')} openEvidence={target => void readEvidence(target)}
@@ -340,6 +355,11 @@ function Workbench() {
           setFocusIndicator(indicator); goTo('student')
         }}
         launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
+      <div hidden={page !== 'chat'}>
+        <LearningChat key={activeSnapshot} snapshot={activeSnapshot} students={students as Parameters<typeof LearningChat>[0]['students']}
+          nodes={data.nodes || []} access={modelAccess} api={api} openAccess={() => goTo('models')} openCitation={setCitation} />
+      </div>
+      {page === 'models' && <ModelAccessPage access={modelAccess} api={api} update={setModelAccess} />}
       {page === 'agent' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
         error={runError} loading={busy} legacy={!!report?.legacy_pending}
         open={openRun} openImport={() => goTo('import')}
@@ -419,7 +439,7 @@ function Workbench() {
         <Card title="投递记录"><Table rowKey="id" dataSource={deliveries} columns={['student','group','state','message'].map((k,i) => ({ dataIndex: k, title: ['学生','收件群','状态','备注'][i] }))} /></Card>
       </>}
       {page === 'settings' && <>
-        <Card title="本机依赖"><Space wrap><Tag color={health.model_configured ? 'success' : 'warning'}>GLM {health.model_configured ? '已配置' : '待配置'}</Tag><Tag color={health.ocr_configured ? 'success' : 'warning'}>PaddleOCR {health.ocr_configured ? '已配置' : '待安装'}</Tag></Space></Card>
+        <Card title="本机依赖"><Space wrap><Button onClick={() => goTo('models')}>模型接入</Button><Tag color={health.ocr_configured ? 'success' : 'warning'}>PaddleOCR {health.ocr_configured ? '已配置' : '待安装'}</Tag></Space></Card>
         <Card title="后台任务"><Table rowKey="id" dataSource={jobs} columns={[{ title: '类型', render: (_,j) => ({ extract:'解析资料', publish:'建立索引', ...runNames } as Row)[j.kind] },
           { title: '状态', render: (_,j) => <Tag color={j.state === 'failed' ? 'error' : j.state === 'done' ? 'success' : 'processing'}>{({ queued:'排队', running:'处理中', done:'完成', failed:'失败' } as Row)[j.state]}</Tag> },
           { title: '错误', dataIndex: 'error' }, { title: '操作', render: (_,j) => j.state === 'failed' ? <Button onClick={() => perform(() => api('/jobs/' + j.id + '/retry', post))}>重试</Button> : null }]} /></Card>

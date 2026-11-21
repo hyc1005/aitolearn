@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 from unittest import TestCase, skipUnless
@@ -126,6 +127,57 @@ class WorkflowTests(TestCase):
                                    "student": "D01", "node": "N01", "indicator": "T01I2"}).json()
             question = next(r for r in rows if r["材料编号"] == "Q015")
             self.assertEqual((question["得分"], question["满分"]), ("2", "3"))
+
+    def test_chat_accepts_only_local_quotes_and_keeps_the_selected_student(self):
+        batch = self.post_import()
+        self.run_cleaning(batch["run_id"])
+        snapshot = self.confirm(batch).json()["snapshot_id"]
+        with store.db() as conn:
+            store.put(conn, "material", "published-chat", {"id": "published-chat", "state": "published",
+                "blocks": [{"id": "q015-rule", "material": "published-chat", "title": "整式教材",
+                            "locator": "Q015", "text": "Q015 去括号时，括号前是负号需要变号。"}]})
+            store.put(conn, "material", "draft-chat", {"id": "draft-chat", "state": "review",
+                "blocks": [{"id": "draft-block", "material": "draft-chat", "title": "待审",
+                            "locator": "Q015", "text": "Q015 待审内容"}]})
+
+        def selected_quotes(provider, messages, session, **options):
+            payload = json.loads(messages[-1]["content"])
+            evidence = payload["sources"]
+            self.assertFalse(any("待审内容" in item["text"] for item in evidence))
+            student = next(item for item in evidence if item["kind"] == "answer")
+            self.assertNotIn("D01", student["text"])
+            material = next(item for item in evidence if "括号前是负号" in item["text"])
+            return json.dumps({"quotes": [{"id": student["id"], "quote": "得分 2/3"},
+                                          {"id": material["id"], "quote": "括号前是负号需要变号"},
+                                          {"id": student["id"], "quote": "编造的成绩"},
+                                          {"id": 999, "quote": "未登记的教材"}]})
+
+        body = {"snapshot_id": snapshot, "student": "D01", "node": "N01", "question": "Q015 的失分和去括号依据"}
+        with patch("backend.learning_chat.complete", side_effect=selected_quotes):
+            response = self.client.post("/api/learning-chat", json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        parts = response.json()["parts"]
+        self.assertEqual([part["quote"] for part in parts], ["得分 2/3", "括号前是负号需要变号"])
+        self.assertEqual(parts[0]["source"]["attempt_id"], "D01-N01-Q015")
+        self.assertEqual(parts[1]["source"]["citation"]["id"], "q015-rule")
+        self.assertEqual(self.client.post("/api/learning-chat", json={**body, "snapshot_id": "missing"}).status_code, 404)
+        self.assertEqual(self.client.post("/api/learning-chat", json={**body, "student": "missing"}).status_code, 422)
+
+    def test_model_access_activates_provider_without_exposing_key(self):
+        credentials = {}
+        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": ""}), \
+                patch("backend.models.keyring.get_password", side_effect=lambda service, provider: credentials.get(provider)), \
+                patch("backend.main.keyring.set_password", side_effect=lambda service, provider, key: credentials.update({provider: key})):
+            path = "/api/models/settings/deepseek"
+            self.assertEqual(self.client.put(path, json={}).status_code, 422)
+            response = self.client.put(path, json={"api_key": "synthetic-test-key"})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["active"], "deepseek")
+            self.assertEqual(credentials["deepseek"], "synthetic-test-key")
+            self.assertNotIn("synthetic-test-key", response.text)
+            with patch("backend.main.complete", return_value="OK") as probe:
+                self.assertEqual(self.client.post("/api/models/test/deepseek").status_code, 200)
+                self.assertEqual(probe.call_args.args[0], "deepseek")
 
     def test_distribution_matches_pinned_evidence_and_profile(self):
         batch = self.post_import()

@@ -1,10 +1,9 @@
 import json
-import os
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from .data import profile, split
+from .models import active_provider, model_headers, provider_config, provider_key
 from .search import search
 from .store import db
 
@@ -42,23 +41,25 @@ class Draft(BaseModel):
     insufficient_materials: bool = False
 
 
-def api_key():
-    return os.getenv("OPENCODE_GO_API_KEY", "").strip() or (
-        Path("goapi.txt").read_text(encoding="utf-8-sig").strip() if Path("goapi.txt").exists() else "")
+def api_key(conn=None):
+    return provider_key(active_provider(conn))
 
 
 def configured_model(session):
     from smolagents import OpenAIServerModel
 
-    key = api_key()
+    provider = active_provider()
+    config = provider_config(provider)
+    key = provider_key(provider)
     if not key:
-        raise ValueError("请设置 OPENCODE_GO_API_KEY")
+        raise ValueError("请先在模型接入中配置 API 密钥")
     return OpenAIServerModel(
-        model_id=os.getenv("OPENCODE_GO_MODEL", "glm-5.3-flash"),
-        api_base=os.getenv("OPENCODE_GO_BASE_URL", "https://opencode.ai/inference/go/openai/v1"),
+        model_id=config["model"],
+        api_base=config["base_url"],
         api_key=key,
-        client_kwargs={"default_headers": {"x-opencode-session": session, "User-Agent": "aitolearn/1.0"},
+        client_kwargs={"default_headers": model_headers(provider, session),
                        "timeout": 60, "max_retries": 0},
+        **({"extra_body": {"thinking": {"type": "disabled"}}} if provider == "deepseek" else {}),
     )
 
 

@@ -10,13 +10,17 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+import keyring
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from keyring.errors import KeyringError
+from pydantic import BaseModel, Field, SecretStr
 
 from .agent import api_key
 from .data import profile, read_file, student_scores
+from .learning_chat import ChatRequest, collect_sources, reply
+from .models import KEY_SERVICE, PROVIDERS, active_provider, complete, provider_config, provider_key
 from .recommendation_review import preview_text
 from .search import search
 from .snapshots import current_snapshot, legacy_batches, queue_cleaning, queue_job, table_data
@@ -72,6 +76,69 @@ async def read_upload(file):
 def health():
     return {"status": "ready", "model_configured": bool(api_key()),
             "ocr_configured": Path(".venv-ocr/Scripts/python.exe").exists()}
+
+
+class ModelSettings(BaseModel):
+    api_key: SecretStr | None = None
+
+
+@app.get("/api/models/settings")
+def model_settings():
+    return {"active": active_provider(), "providers": [
+        {"id": provider, **provider_config(provider), "configured": bool(provider_key(provider))}
+        for provider in PROVIDERS
+    ]}
+
+
+@app.put("/api/models/settings/{provider}")
+def save_model_settings(provider: str, setting: ModelSettings):
+    if provider not in PROVIDERS:
+        raise HTTPException(404, "模型平台不存在")
+    key = setting.api_key.get_secret_value().strip() if setting.api_key else ""
+    if key:
+        if len(key) > 2048 or any(char.isspace() for char in key):
+            raise HTTPException(400, "API 密钥格式无效")
+        try:
+            keyring.set_password(KEY_SERVICE, provider, key)
+        except KeyringError:
+            raise HTTPException(503, "无法写入系统凭据库，可通过环境变量配置 API 密钥") from None
+    if not provider_key(provider):
+        raise HTTPException(422, "请先填写该平台的 API 密钥")
+    with db() as conn:
+        put(conn, "settings", "model_provider", {"id": provider})
+    return model_settings()
+
+
+@app.post("/api/models/test/{provider}")
+def test_model_connection(provider: str):
+    if provider not in PROVIDERS:
+        raise HTTPException(404, "模型平台不存在")
+    if not provider_key(provider):
+        raise HTTPException(422, "请先保存该平台的 API 密钥")
+    try:
+        complete(provider, [{"role": "user", "content": "只回复 OK"}], new_id(), max_tokens=32)
+    except ValueError as error:
+        raise HTTPException(502, str(error)) from None
+    return {"model": provider_config(provider)["model"]}
+
+
+@app.post("/api/learning-chat")
+def learning_chat(request: ChatRequest):
+    if not request.question.strip() or any(len(question) > 1200 for question in request.history):
+        raise HTTPException(422, "请输入问题，单条最多 1200 字")
+    if (request.student or request.node) and not request.snapshot_id:
+        raise HTTPException(422, "请先确认数据快照")
+    try:
+        with db() as conn:
+            snapshot = require(conn, "snapshot", request.snapshot_id) if request.snapshot_id else None
+            sources = collect_sources(conn, snapshot, request)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
+    try:
+        result = reply(request, sources, new_id())
+    except ValueError as error:
+        raise HTTPException(502, str(error)) from None
+    return {**result, "snapshot_id": request.snapshot_id}
 
 
 @app.get("/api/jobs")
@@ -501,8 +568,8 @@ def start_run(data: Run):
         if data.snapshot_id and data.snapshot_id != snapshot["id"]:
             raise HTTPException(409, "数据快照已更新，请刷新画像后重新发起")
         source = table_data(snapshot)
-        if not api_key():
-            raise HTTPException(400, "请配置模型密钥")
+        if not api_key(conn):
+            raise HTTPException(400, "请先在模型接入中配置 API 密钥")
         if bool(data.student) == bool(data.group):
             raise HTTPException(400, "请选择单个学生或班级")
         if (data.student and data.student not in source["模拟学生"]) or (

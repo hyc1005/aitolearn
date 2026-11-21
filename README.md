@@ -13,7 +13,9 @@ Windows 原生应用。前端使用 React、Ant Design 和 ECharts。后端使�
 
 可用 `setup.ps1 -Python C:\path\python.exe` 指定解释器。仅验证数字 PDF、表格和 UI 时用 `setup.ps1 -SkipOcr -KeywordOnly`，并以 `start.ps1 -KeywordOnly` 启动。Windows x64 的 Python 3.12 关键词模式使用验收时固定的依赖版本。混合检索需要完整安装和首次向量模型下载。
 
-模型默认走 OpenCode Go 的 `glm-5.3-flash`。通过本机环境设置 `OPENCODE_GO_API_KEY`，也兼容根目录已有的 `goapi.txt`。接口可由 `OPENCODE_GO_BASE_URL` 覆盖。启动时优先使用环境变量。运行 `.\.venv\Scripts\python.exe -m scripts.check_model` 可以用自制算术题验收模型工具调用。
+左侧「模型接入」预设 OpenCode Go（`glm-5.3-flash`）和 DeepSeek（`deepseek-flash`）。可查看接口地址、填写密钥、启用平台并测试连接。密钥保存在本机凭据库，也可通过 `OPENCODE_GO_API_KEY` 或 `DEEPSEEK_API_KEY` 提供，环境变量优先。OpenCode Go 兼容根目录已有的 `goapi.txt` 及 `OPENCODE_GO_BASE_URL`、`OPENCODE_GO_MODEL`。运行 `.\.venv\Scripts\python.exe -m scripts.check_model` 可验证当前平台的工具调用。
+
+左侧「学情对话」默认查询已发布教材。选定学生和测验后，可以结合该批已确认快照中的已评分作答提问，例如“D01 的 Q015 最后填了什么？”模型从当前问题相关的有限原文片段中挑选引用。页面逐段显示经原文核验的内容，可打开教材或学生原始作答。对话的问题及相关片段由当前配置的模型平台处理。
 
 ## 首次使用
 

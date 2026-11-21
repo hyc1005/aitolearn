@@ -37,6 +37,7 @@ export const workbenchTheme: ThemeConfig = {
     colorLink: palette.accent,
     colorText: palette.ink,
     colorTextSecondary: palette.muted,
+    colorTextPlaceholder: palette.muted,
     colorBgLayout: palette.paper,
     colorBgContainer: palette.surface,
     colorBgElevated: palette.surface,
@@ -47,7 +48,8 @@ export const workbenchTheme: ThemeConfig = {
     controlHeight: 36,
     borderRadius: 6,
     fontFamily: '"Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
-    fontSize: 16,
+    fontSize: 20,
+    fontSizeSM: 18,
     motion: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
   },
   components: {
