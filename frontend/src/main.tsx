@@ -1,7 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Menu, Select, Space, Table, Tag, Typography, theme } from 'antd'
-import { ApartmentOutlined, ApiOutlined, BookOutlined, CloudUploadOutlined, DashboardOutlined, MessageOutlined, RadarChartOutlined, SendOutlined, SettingOutlined } from '@ant-design/icons'
+import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Select, Skeleton, Space, Table, Tag, Tooltip, Typography, theme } from 'antd'
+import { BookOutlined } from '@ant-design/icons'
+import { NavIcon } from './NavIcon'
 import zhCN from 'antd/locale/zh_CN'
 import AgentWorkbench, { ReviewPanel, runNames } from './AgentWorkbench'
 import { CaseReplay, type CaseData } from './CaseReplay'
@@ -23,12 +24,13 @@ type Row = Record<string, any>
 type Axis = { id: string; label: string; score: number | null; n: number; coverage: number; population: number; status: string; earned: number; possible: number; distribution: number[] }
 const noAxes: Axis[] = []
 const pages = [
-  ['overview', '班级诊断', <DashboardOutlined />], ['chat', '学情对话', <MessageOutlined />],
-  ['models', '模型接入', <ApiOutlined />], ['agent', 'Agent 工作台', <ApartmentOutlined />],
-  ['import', '导入与清洗', <CloudUploadOutlined />],
-  ['materials', '课程与资料', <BookOutlined />], ['student', '学生画像', <RadarChartOutlined />],
-  ['drafts', '学习建议', <SendOutlined />], ['settings', '任务与设置', <SettingOutlined />],
+  ['overview', '班级诊断'], ['chat', '学情对话'], ['models', '模型接入'], ['agent', 'Agent 工作台'],
+  ['import', '导入与清洗'], ['materials', '课程与资料'], ['student', '画像'],
+  ['drafts', '学习建议'], ['settings', '任务与设置'],
 ] as const
+type ProfileTarget = { kind: 'student' | 'group'; id: string }
+const mobileSidebarQuery = '(max-width: 800px)'
+const sidebarPreference = 'aitolearn.sidebar.collapsed'
 function pageFromHash() {
   if (location.hash.startsWith('#agent')) return 'agent'
   if (location.hash === '#chat') return 'chat'
@@ -48,8 +50,8 @@ const post = { method: 'POST' }
 const param = encodeURIComponent
 function query(values: Record<string, string>) { return '?' + new URLSearchParams(values).toString() }
 
-function StudentRadar({ axes, compare, onSelect }: {
-  axes: Axis[]; compare: Axis[]; onSelect: (axis: Axis) => void
+function ProfileRadar({ axes, compare, label, onSelect }: {
+  axes: Axis[]; compare: Axis[]; label: string; onSelect: (axis: Axis) => void
 }) {
   const { token } = theme.useToken()
   const ref = useRef<HTMLDivElement>(null)
@@ -81,23 +83,28 @@ function StudentRadar({ axes, compare, onSelect }: {
         radar: { indicator: axes.map(axis => ({ name: axis.label, max: 100 })), radius: '53%', axisNameGap: 8,
           triggerEvent: true, axisName: { color: token.colorTextSecondary, fontSize: token.fontSizeSM, width: 94, overflow: 'break' } },
         series: [{ type: 'radar', lineStyle: { width: complete ? 2 : 0 }, symbolSize: 8,
-          data: [{ name: '学生', value: axes.map(axis => axis.score ?? NaN), itemStyle: { color: token.colorPrimary },
+          data: [{ name: label, value: axes.map(axis => axis.score ?? NaN), itemStyle: { color: token.colorPrimary },
             areaStyle: { opacity: complete ? 0.18 : 0 } },
             ...(hasComparison ? [{ name: '班级参照', value: previous,
               itemStyle: { color: chartComparisonColor }, lineStyle: { width: 1, type: 'dashed' } }] : [])] }],
       },
-      media: [{ query: { maxWidth: 365 }, option: {
+      media: [{ query: { maxWidth: 520 }, option: {
+        radar: { axisName: {
+          lineHeight: 19,
+          formatter: (label: string) => label.match(/.{1,6}/gu)?.join('\n') || label,
+        } },
+      } }, { query: { maxWidth: 365 }, option: {
         radar: { radius: '41%', axisName: {
           lineHeight: 19,
           formatter: (label: string) => label.match(/.{1,4}/gu)?.join('\n') || label,
         } },
       } }],
     }, { notMerge: true })
-  }, [axes, compare, token])
+  }, [axes, compare, label, token])
   return <section className="student-radar" aria-label="整体轮廓">
     <Title level={5}>整体轮廓</Title>
-    <Space wrap className="radar-legend"><span>学生</span>{hasComparison && <span className="radar-class">班级参照</span>}</Space>
-    <div className="chart radar" ref={ref} role="img" aria-label="学生学习表现雷达图" />
+    <Space wrap className="radar-legend"><span>{label}</span>{hasComparison && <span className="radar-class">班级参照</span>}</Space>
+    <div className="chart radar" ref={ref} role="img" aria-label={label + '学习表现雷达图'} />
   </section>
 }
 
@@ -143,12 +150,27 @@ function SourcePage({ citation }: { citation: Row }) {
 function Workbench() {
   const { message } = App.useApp()
   const [page, setPage] = useState<string>(pageFromHash)
+  const [mobile, setMobile] = useState(() => window.matchMedia(mobileSidebarQuery).matches)
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const [rail, setRail] = useState(() => {
+    try { return localStorage.getItem(sidebarPreference) === 'true' }
+    catch { return false }
+  })
+  const navToggle = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    const media = window.matchMedia(mobileSidebarQuery)
+    const resize = () => { setMobile(media.matches); setMobileOpen(false) }
+    media.addEventListener('change', resize)
+    return () => media.removeEventListener('change', resize)
+  }, [])
   const [runId, setRunId] = useState(() => /^#agent\/([a-f0-9]+)$/.exec(location.hash)?.[1] || '')
   const [runDetail, setRunDetail] = useState<Row>()
   const [runError, setRunError] = useState('')
   const [replay, setReplay] = useState<CaseData>()
   const [data, setData] = useState<Row>({})
-  const [student, setStudent] = useState('')
+  const [target, setTarget] = useState<ProfileTarget>()
+  const student = target?.kind === 'student' ? target.id : ''
+  const profileGroup = target?.kind === 'group' ? target.id : ''
   const [node, setNode] = useState('')
   const [topic, setTopic] = useState('')
   const [jobs, setJobs] = useState<Row[]>([])
@@ -180,7 +202,6 @@ function Workbench() {
     if (preview) practicePreview.current?.scrollIntoView({ block: 'nearest' })
   }, [preview])
   const [busy, setBusy] = useState(false)
-  const [classFilter, setClassFilter] = useState('')
   async function refresh() {
     const [r, library, map, list, delivery, status] = await Promise.all([
       api('/imports/report'), api('/materials'), api('/curriculum'), api('/recommendations'), api('/deliveries'), api('/health'),
@@ -246,21 +267,32 @@ function Workbench() {
     return () => { active = false; clearInterval(timer) }
   }, [runId, page])
   const evidenceRequest = useRef(0)
-  useLayoutEffect(() => { evidenceRequest.current++ }, [student, node, page, report?.snapshot_id, profileSnapshot])
+  const profileRequestSnapshot = page === 'student' ? profileSnapshot : ''
+  const requestedStudent = page === 'student' ? student : ''
+  const requestedGroup = page === 'student' ? profileGroup : ''
+  const requestedNode = page === 'student' ? node : ''
+  const profileKey = JSON.stringify([requestedStudent, requestedGroup, requestedNode, profileRequestSnapshot || report?.snapshot_id || ''])
+  const [profileError, setProfileError] = useState('')
+  useLayoutEffect(() => { evidenceRequest.current++ }, [profileKey, page])
   useEffect(() => {
-    let active = true
-    void api('/profiles' + query({ student, node, snapshot_id: page === 'student' ? profileSnapshot : '' })).then(result => {
-      if (active) setData({ ...result, selectedStudent: student, selectedNode: node })
-    }).catch(error => { if (active) message.error(error.message) })
-    return () => { active = false }
-  }, [student, node, report?.snapshot_id, page, profileSnapshot])
+    const controller = new AbortController()
+    setProfileError('')
+    void api('/profiles' + query({ student: requestedStudent, group: requestedGroup, node: requestedNode,
+      snapshot_id: profileRequestSnapshot || report?.snapshot_id || '' }), { signal: controller.signal }).then(result => {
+      if (!controller.signal.aborted) setData({ ...result, profileKey })
+    }).catch(error => {
+      if (!controller.signal.aborted) { setProfileError(error.message); message.error(error.message) }
+    })
+    return () => controller.abort()
+  }, [profileKey, profileRequestSnapshot, report?.snapshot_id, requestedStudent, requestedGroup, requestedNode])
+  const profileReady = data.profileKey === profileKey
   useEffect(() => {
-    if (page !== 'student' || !focusIndicator || data.selectedStudent !== student || data.selectedNode !== node || data.snapshot_id !== profileSnapshot) return
+    if (page !== 'student' || !focusIndicator || !profileReady) return
     const indicator = document.getElementById('indicator-' + focusIndicator)
     indicator?.scrollIntoView({ block: 'nearest' })
     indicator?.querySelector('button')?.focus({ preventScroll: true })
     setFocusIndicator('')
-  }, [page, focusIndicator, data, student, node, profileSnapshot])
+  }, [page, focusIndicator, profileReady])
   const cleaningAudit = report?.last_agent_review
   const groups: Row[] = data.groups || []
   const students: Row[] = data.students || []
@@ -269,7 +301,7 @@ function Workbench() {
   const axes: Axis[] = useMemo(() => topic
     ? (current.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : current.axes || noAxes,
   [current.axes, current.topics, topic])
-  const comparison: Row = groups.find(g => g.group === currentClass) || {}
+  const comparison: Row = student && groups.find(g => g.group === currentClass) || {}
   const compare: Axis[] = useMemo(() => topic
     ? (comparison.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : comparison.axes || noAxes,
   [comparison.axes, comparison.topics, topic])
@@ -286,9 +318,9 @@ function Workbench() {
       if (request === evidenceRequest.current) message.error((error as Error).message)
     }
   }
-  const chooseEvidence = (axis: Axis, group?: string) => {
-    if (!data.snapshot_id || data.selectedNode !== node || data.selectedStudent !== student) return
-    void readEvidence({ axis, indicator: axis.id, student: group ? '' : student, group: group || '', node, snapshot_id: data.snapshot_id })
+  const chooseEvidence = (axis: Axis) => {
+    if (!data.snapshot_id || !profileReady) return
+    void readEvidence({ axis, indicator: axis.id, student, group: profileGroup, node, snapshot_id: data.snapshot_id })
   }
   const openReplay = () => perform(async () => setReplay(await api<CaseData>('/agent/cases/q015')))
   const selectedAnswer: Row | undefined = selected?.rows.find((row: Row) => row.作答事件编号 === answerId)
@@ -334,15 +366,43 @@ function Workbench() {
     else if (saved.review_run_id) { setDraft(undefined); openRun(saved.review_run_id) }
   })
   const activeSnapshot = report?.snapshot_id || ''
-  const nodeChoice = <Select aria-label="测验节点" value={node} style={{ width: 142 }} onChange={setNode}
+  const openProfile = (kind: ProfileTarget['kind'], id: string, node: string, snapshot: string, indicator: string) => {
+    setTarget({ kind, id }); setNode(node); setProfileSnapshot(snapshot); setTopic('')
+    setFocusIndicator(indicator); goTo('student')
+  }
+  const nodeChoice = <Select aria-label="测验节点" value={node} className="profile-node" onChange={value => { setNode(value); setFocusIndicator('') }}
     options={[{ value: '', label: '全部测验' }, ...(data.nodes || []).map((v: string) => ({ value: v, label: v }))]} />
-  const studentChoice = <Select aria-label="选择学生" placeholder="选择学生" value={student || undefined} style={{ width: 170 }}
-    showSearch onChange={v => { setStudent(v); setProfileSnapshot(''); setTopic('') }}
-    options={students.filter(s => !classFilter || s.模拟班级编号 === classFilter).map(s => ({ value: s.学生编号, label: s.学生编号 + ' · ' + s.模拟班级编号 }))} />
+  const profileChoices = [
+    { label: '班级', options: groups.map(g => ({ value: 'group:' + g.group, label: g.group + ' · 班级' })) },
+    { label: '学生', options: students.map(s => ({ value: 'student:' + s.学生编号, label: s.学生编号 + ' · ' + s.模拟班级编号 })) },
+  ]
+  const navExpanded = mobile ? mobileOpen : !rail
+  const navAction = navExpanded ? '收起导航' : '展开导航'
+  const toggleNav = () => {
+    if (mobile) { setMobileOpen(!mobileOpen); return }
+    setRail(!rail)
+    try { localStorage.setItem(sidebarPreference, String(!rail)) } catch { /* The toggle still works for this visit. */ }
+  }
   return <Layout className="shell">
-    <Layout.Sider width={216} className="sidebar">
-      <div className="brand"><span className="brand-symbol"><ApartmentOutlined /></span><div>智慧学伴<small>教师工作台</small></div></div>
-      <Menu theme="dark" selectedKeys={[page]} mode="inline" items={pages.map(([key, label, icon]) => ({ key, label, icon }))} onClick={e => goTo(e.key)} />
+    <Layout.Sider width={!mobile && rail ? 72 : 216} className={'sidebar' + (!mobile && rail ? ' sidebar-rail' : '')}>
+      <div className="brand">
+        <span className="brand-symbol"><NavIcon name="agent" /></span>
+        <div className="brand-name" aria-label="智慧学伴">智慧学伴</div>
+        <Tooltip title={navAction} placement={mobile ? 'bottom' : 'right'}>
+          <button type="button" className="nav-toggle" ref={navToggle} aria-label={navAction} aria-controls="workbench-navigation"
+            aria-expanded={navExpanded} onClick={toggleNav}><NavIcon name="toggle" flipped={!navExpanded} /></button>
+        </Tooltip>
+      </div>
+      <nav id="workbench-navigation" aria-label="工作台导航" hidden={mobile && !mobileOpen}>
+        {pages.map(([key, label]) => <Tooltip key={key} title={!mobile && rail ? label : undefined} placement="right">
+          <button type="button" className="nav-item" aria-current={page === key ? 'page' : undefined} aria-label={label} onClick={() => {
+            goTo(key)
+            if (mobile) { setMobileOpen(false); navToggle.current?.focus() }
+          }}>
+            <NavIcon name={key} /><span>{label}</span>
+          </button>
+        </Tooltip>)}
+      </nav>
     </Layout.Sider>
     <Layout.Content className="content">
       {page !== 'overview' && <header className="page-head"><Title level={2}>{pages.find(p => p[0] === page)?.[1]}</Title>
@@ -350,14 +410,13 @@ function Workbench() {
       <Diagnostics active={page === 'overview'} data={data.groups && (!activeSnapshot || activeSnapshot === data.snapshot_id) ? data as Profile : undefined}
         count={students.length} attempts={report?.valid_scored} busy={busy} api={api}
         openReplay={openReplay} openImport={() => goTo('import')} openEvidence={target => void readEvidence(target)}
-        openStudent={(student, node, snapshot, indicator) => {
-          setClassFilter(''); setStudent(student); setNode(node); setProfileSnapshot(snapshot); setTopic('')
-          setFocusIndicator(indicator); goTo('student')
-        }}
+        openStudent={(id, node, snapshot, indicator) => openProfile('student', id, node, snapshot, indicator)}
+        openGroup={(id, node, snapshot, indicator) => openProfile('group', id, node, snapshot, indicator)}
         launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
       <div hidden={page !== 'chat'}>
-        <LearningChat key={activeSnapshot} snapshot={activeSnapshot} students={students as Parameters<typeof LearningChat>[0]['students']}
-          nodes={data.nodes || []} access={modelAccess} api={api} openAccess={() => goTo('models')} openCitation={setCitation} />
+        <LearningChat key={activeSnapshot} snapshot={activeSnapshot}
+          students={(data.snapshot_id === activeSnapshot ? students : []) as Parameters<typeof LearningChat>[0]['students']}
+          nodes={data.snapshot_id === activeSnapshot ? data.nodes : []} access={modelAccess} api={api} openAccess={() => goTo('models')} openCitation={setCitation} />
       </div>
       {page === 'models' && <ModelAccessPage access={modelAccess} api={api} update={setModelAccess} />}
       {page === 'agent' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
@@ -417,16 +476,38 @@ function Workbench() {
           {hits.map(h => <Paragraph key={h.id} className="spaced"><Button type="link" onClick={() => setCitation(h)}>{h.title} · {h.locator}</Button> {h.text.slice(0, 130)}</Paragraph>)}</Card>
       </>}
       {page === 'student' && <>
-        <Card className="student-profile-card" title="学生学习表现" extra={<Space wrap><Select allowClear placeholder="筛选班级" onChange={v => { setClassFilter(v || ''); setStudent('') }} options={groups.map(g => ({ value: g.group }))} />{studentChoice}{nodeChoice}</Space>}>
-          {!student ? <Empty description="选择学生查看指标对照和作答" /> : <>
+        <Card className="student-profile-card" title={target ? (student ? '学生 ' : '班级 ') + target.id : '学习表现'}
+          extra={<Space wrap><Select aria-label="选择画像对象" placeholder="搜索学生或班级" className="profile-target" allowClear
+            showSearch={{ optionFilterProp: 'label' }} value={target && target.kind + ':' + target.id} options={profileChoices}
+            onChange={(value?: string) => {
+              const kind = value?.startsWith('student:') ? 'student' : 'group'
+              setTarget(value ? { kind, id: value.slice(kind.length + 1) } : undefined)
+              setProfileSnapshot(''); setTopic(''); setFocusIndicator('')
+            }} />{nodeChoice}</Space>}>
+          {!target ? <Empty description="选择学生或班级查看画像" /> : !profileReady
+            ? profileError ? <Alert type="error" title={profileError} /> : <Skeleton active /> : <>
             <Space wrap><Button type={!topic ? 'primary' : 'default'} onClick={() => setTopic('')}>主题总览</Button>
               {(current.topics || []).map((a: Axis) => <Button key={a.id} type={topic === a.id ? 'primary' : 'default'} onClick={() => setTopic(a.id)}>{a.label}</Button>)}</Space>
             {!!axes.length && <div className="student-profile-grid">
-              <StudentRadar axes={topic ? axes : current.topics || noAxes} compare={topic ? compare : comparison.topics || noAxes} onSelect={chooseEvidence} />
-              <Comparison axes={axes} compare={compare} select={chooseEvidence} />
+              <ProfileRadar label={student ? '学生' : '班级'} axes={topic ? axes : current.topics || noAxes}
+                compare={topic ? compare : comparison.topics || noAxes} onSelect={chooseEvidence} />
+              {student ? <Comparison axes={axes} compare={compare} select={chooseEvidence} /> :
+                <section className="class-indicators" aria-label="班级指标与覆盖">
+                  <Title level={5}>指标与覆盖</Title>
+                  {axes.map(axis => <div className="class-indicator" id={'indicator-' + axis.id} key={axis.id}>
+                    <Button type="link" className="comparison-label" onClick={() => chooseEvidence(axis)}>{axis.label}</Button>
+                    <strong>{axis.score == null ? '暂无得分' : axis.score + '%'}</strong>
+                    <Text type="secondary">覆盖 {axis.coverage}/{axis.population} 人 · {axis.n} 条作答</Text>
+                  </div>)}
+                </section>}
             </div>}
-            {!!current.totals?.length && <Table rowKey="节点编号" dataSource={current.totals} pagination={false} columns={[{ title: '测验', dataIndex: '节点编号' }, { title: '总分', dataIndex: '测验总分' }]} />}
-            <Space className="spaced"><Button type="primary" loading={busy} onClick={() => launch({ student, snapshot_id: data.snapshot_id })}>生成学习建议</Button><Button loading={busy} onClick={() => launch({ student, variant: true, snapshot_id: data.snapshot_id })}>生成建议与变式题</Button></Space>
+            {!!student && !!current.totals?.length && <Table rowKey="节点编号" dataSource={current.totals} pagination={false} columns={[{ title: '测验', dataIndex: '节点编号' }, { title: '总分', dataIndex: '测验总分' }]} />}
+            {!!data.snapshot_id && <Space wrap className="spaced">
+              <Button type="primary" loading={busy} onClick={() => launch({ student, group: profileGroup, node, snapshot_id: data.snapshot_id })}>
+                {student ? '生成学习建议' : '生成班级建议'}
+              </Button>
+              {student && <Button loading={busy} onClick={() => launch({ student, node, variant: true, snapshot_id: data.snapshot_id })}>生成建议与变式题</Button>}
+            </Space>}
           </>}
         </Card>
       </>}

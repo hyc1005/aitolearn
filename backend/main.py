@@ -124,7 +124,7 @@ def test_model_connection(provider: str):
 
 @app.post("/api/learning-chat")
 def learning_chat(request: ChatRequest):
-    if not request.question.strip() or any(len(question) > 1200 for question in request.history):
+    if not request.question.strip() or any(isinstance(turn, str) and len(turn) > 1200 for turn in request.history):
         raise HTTPException(422, "请输入问题，单条最多 1200 字")
     if (request.student or request.node) and not request.snapshot_id:
         raise HTTPException(422, "请先确认数据快照")

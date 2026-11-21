@@ -27,12 +27,13 @@ export type DiagnosticSelection = { group: string; node: string; indicator: stri
 type CellKey = Omit<DiagnosticSelection, 'snapshot_id'>
 type Mode = '课程顺序' | '班级差异' | '覆盖情况'
 
-export function Diagnostics({ data, count, attempts, active, busy, api, openReplay, openImport, openEvidence, openStudent, launchGroup }: {
+export function Diagnostics({ data, count, attempts, active, busy, api, openReplay, openImport, openEvidence, openStudent, openGroup, launchGroup }: {
   data?: Profile; count: number; attempts?: number; active: boolean; busy: boolean
   api: <T>(url: string, options?: RequestInit) => Promise<T>
   openReplay: () => void; openImport: () => void
   openEvidence: (target: DiagnosticSelection & { student: string; axis: DiagnosticAxis }) => void
   openStudent: (student: string, node: string, snapshot: string, indicator: string) => void
+  openGroup: (group: string, node: string, snapshot: string, indicator: string) => void
   launchGroup: (target: DiagnosticSelection) => void
 }) {
   const [group, setGroup] = useState('')
@@ -144,7 +145,10 @@ export function Diagnostics({ data, count, attempts, active, busy, api, openRepl
         <Button onClick={() => openStudent(student, validCell.node, snapshot, validCell.indicator)}>学生画像</Button>
       </Space>
     </div>}
-    {snapshot && !selectedPoint && selectedAxis.n > 0 && <Button loading={busy} className="spaced" onClick={() => launchGroup({ ...validCell, snapshot_id: snapshot })}>生成班级建议</Button>}
+    {snapshot && <Space wrap className="spaced">
+      <Button onClick={() => openGroup(validCell.group, validCell.node, snapshot, validCell.indicator)}>班级画像</Button>
+      {!selectedPoint && selectedAxis.n > 0 && <Button loading={busy} onClick={() => launchGroup({ ...validCell, snapshot_id: snapshot })}>生成班级建议</Button>}
+    </Space>}
   </aside>
 
   return <div hidden={!active} className="diagnostics">

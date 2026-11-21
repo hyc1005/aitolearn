@@ -147,7 +147,8 @@ class WorkflowTests(TestCase):
             student = next(item for item in evidence if item["kind"] == "answer")
             self.assertNotIn("D01", student["text"])
             material = next(item for item in evidence if "括号前是负号" in item["text"])
-            return json.dumps({"quotes": [{"id": student["id"], "quote": "得分 2/3"},
+            return json.dumps({"answer": "这次作答得到 2 分，满分 3 分。",
+                               "quotes": [{"id": student["id"], "quote": "得分 2/3"},
                                           {"id": material["id"], "quote": "括号前是负号需要变号"},
                                           {"id": student["id"], "quote": "编造的成绩"},
                                           {"id": 999, "quote": "未登记的教材"}]})
@@ -156,12 +157,33 @@ class WorkflowTests(TestCase):
         with patch("backend.learning_chat.complete", side_effect=selected_quotes):
             response = self.client.post("/api/learning-chat", json=body)
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["answer"], "这次作答得到 2 分，满分 3 分。")
         parts = response.json()["parts"]
         self.assertEqual([part["quote"] for part in parts], ["得分 2/3", "括号前是负号需要变号"])
         self.assertEqual(parts[0]["source"]["attempt_id"], "D01-N01-Q015")
         self.assertEqual(parts[1]["source"]["citation"]["id"], "q015-rule")
         self.assertEqual(self.client.post("/api/learning-chat", json={**body, "snapshot_id": "missing"}).status_code, 404)
         self.assertEqual(self.client.post("/api/learning-chat", json={**body, "student": "missing"}).status_code, 422)
+        with patch("backend.learning_chat.complete", return_value='{"answer":"得了满分","quotes":[]}'):
+            missing = self.client.post("/api/learning-chat", json={**body, "question": "Q999 的得分是多少？"})
+        self.assertEqual(missing.status_code, 200, missing.text)
+        self.assertIn("作答证据不足", missing.json()["answer"])
+
+    def test_general_chat_works_without_a_snapshot_or_sources(self):
+        def answer(provider, messages, session, **options):
+            payload = json.loads(messages[-1]["content"])
+            self.assertEqual(payload["sources"], [])
+            self.assertEqual(payload["history"], [{"question": "什么是彩虹？", "answer": "一种光学现象。"}])
+            return json.dumps({"answer": "雨滴折射、反射并分散阳光。", "quotes": []})
+
+        with patch("backend.learning_chat.complete", side_effect=answer):
+            response = self.client.post("/api/learning-chat", json={
+                "question": "具体是怎么形成的？",
+                "history": [{"question": "什么是彩虹？", "answer": "一种光学现象。"}],
+            })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["answer"], "雨滴折射、反射并分散阳光。")
+        self.assertEqual(response.json()["parts"], [])
 
     def test_model_access_activates_provider_without_exposing_key(self):
         credentials = {}

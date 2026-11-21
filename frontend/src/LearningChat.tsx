@@ -8,7 +8,7 @@ type Citation = { id: string; title: string; locator: string; material: string; 
 type Source = { title: string; locator: string } & (
   { kind: 'material'; citation: Citation } | { kind: 'answer'; attempt_id: string; answer: Answer }
 )
-type Result = { parts: { quote: string; source: Source }[]; model: string | null }
+type Result = { answer: string; parts: { quote: string; source: Source }[]; model: string }
 type Turn = { question: string; result?: Result; error?: string }
 
 export function LearningChat({ snapshot, students, nodes, access, api, openAccess, openCitation }: {
@@ -34,7 +34,12 @@ export function LearningChat({ snapshot, students, nodes, access, api, openAcces
     try {
       const result = await api<Result>('/learning-chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, snapshot_id: snapshot || '', student, node: student ? node : '', history: previous.filter(turn => turn.result).slice(-5).map(turn => turn.question) }),
+        body: JSON.stringify({
+          question, snapshot_id: student ? snapshot : '', student, node: student ? node : '',
+          history: previous.filter(turn => turn.result).slice(-5).map(turn => ({
+            question: turn.question, answer: turn.result!.answer.slice(0, 1200),
+          })),
+        }),
       })
       setTurns([...previous, { question, result }])
     } catch (error) { setTurns([...previous, { question, error: (error as Error).message }]) }
@@ -49,9 +54,9 @@ export function LearningChat({ snapshot, students, nodes, access, api, openAcces
   return <section className="learning-chat">
     <div className="chat-toolbar">
       <Space wrap>
-        <Select className="chat-student" aria-label="对话学生" showSearch value={student}
-          disabled={busy} onChange={value => { setStudent(value); setTurns([]) }}
-          options={[{ value: '', label: '仅查教材' }, ...students.map(row => ({ value: row.学生编号, label: row.学生编号 + ' · ' + row.模拟班级编号 }))]} />
+        <Select className="chat-student" aria-label="对话学生（可选）" showSearch={{ optionFilterProp: 'label' }} value={student}
+          disabled={busy || !snapshot} onChange={value => { setStudent(value); setNode(''); setTurns([]) }}
+          options={[{ value: '', label: '添加学生（可选）' }, ...students.map(row => ({ value: row.学生编号, label: row.学生编号 + ' · ' + row.模拟班级编号 }))]} />
         <Select aria-label="对话测验" value={node} style={{ minWidth: 150 }} disabled={busy || !student}
           onChange={value => { setNode(value); setTurns([]) }}
           options={[{ value: '', label: '全部测验' }, ...nodes.map(value => ({ value, label: value }))]} />
@@ -62,8 +67,8 @@ export function LearningChat({ snapshot, students, nodes, access, api, openAcces
       </Space>
     </div>
     {!turns.length && <div className="chat-empty">
-      <h2>{student ? '想了解这位学生的哪道题？' : '想查教材里的哪一条内容？'}</h2>
-      <p>{student ? '回答引用已发布资料和所选学生的已评分作答。' : '回答引用已发布教材和教学资料。'}</p>
+      <h2>今天想聊什么？</h2>
+      <p>{student ? '对话可按需查阅已发布资料和该学生的已评分作答。' : '可以直接提问，回答会在相关时引用已发布资料。'}</p>
       {provider && !provider.configured && <Button onClick={openAccess}>配置模型</Button>}
     </div>}
     <div className="chat-thread" aria-label="学情对话记录">
@@ -71,26 +76,28 @@ export function LearningChat({ snapshot, students, nodes, access, api, openAcces
         <p className="chat-question">{turn.question}</p>
         {turn.error ? <div><p role="alert">{turn.error}</p>
           {index === turns.length - 1 && <Button disabled={busy} onClick={() => void send(turn.question, turns.slice(0, index))}>重试</Button>}</div>
-          : turn.result ? turn.result.parts.length ? turn.result.parts.map(({ quote, source }, id) =>
+          : turn.result ? <div>
+            {turn.result.answer && <p className="preserve">{turn.result.answer}</p>}
+            {turn.result.parts.map(({ quote, source }, id) =>
             <blockquote key={id}>
               <p className="preserve">{quote}</p>
               <Button type="link" onClick={() => source.kind === 'answer' ? setSource(source.answer) : openCitation(source.citation)}>
                 {source.title} · {source.locator}
               </Button>
-            </blockquote>) : <p>现有资料里没有找到足够依据。可以补充题号、教材关键词或学生范围。</p>
-          : <p role="status">正在核对资料和作答…</p>}
+            </blockquote>)}
+          </div> : <p role="status">正在回答…</p>}
       </article>)}
       <div ref={bottom} />
     </div>
     <form className="chat-composer" onSubmit={submit}>
-      <Input.TextArea aria-label="输入学情问题" placeholder={student ? '例如：这位学生在 Q015 的过程与最终填写有什么差异？' : '例如：查找去括号的教材说明'}
+      <Input.TextArea aria-label="输入学情问题" placeholder={student ? '问一个问题，或输入题号查看作答' : '问一个问题…'}
         maxLength={1200} autoSize={{ minRows: 2, maxRows: 5 }} value={draft} onChange={event => setDraft(event.target.value)}
         onPressEnter={event => {
           if (!event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(draft) }
         }} />
       <Button type="primary" htmlType="submit" loading={busy} icon={<ArrowUpOutlined />} disabled={!draft.trim() || (!!student && !snapshot) || !provider?.configured}>发送</Button>
     </form>
-    {provider && <p className="chat-provider-note">当前问题、近期提问和相关原文片段由 {provider.name} 处理。</p>}
+    {provider && <p className="chat-provider-note">当前问题、近期对话和相关原文片段由 {provider.name} 处理。</p>}
     <Drawer open={!!source} title="学生原始作答" size="min(850px, 100vw)" onClose={() => setSource(undefined)}>
       {source && <AnswerEvidence answer={source} />}
     </Drawer>
