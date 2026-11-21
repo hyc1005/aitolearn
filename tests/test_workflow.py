@@ -353,3 +353,98 @@ class WorkflowTests(TestCase):
         with patch("backend.recommendation_review.structured_review", return_value=(result, "test")):
             with self.assertRaisesRegex(ValueError, "无效引用"):
                 final_review(draft, "test")
+
+    def test_chat_sessions_restore_context_and_keep_result_cards(self):
+        batch = self.post_import()
+        self.run_cleaning(batch["run_id"])
+        self.confirm(batch)
+        first = self.client.post("/api/learning-chat", json={"question": "看看 DC02 最近一次测验"})
+        self.assertEqual(first.status_code, 200, first.text)
+        body = first.json()
+        self.assertTrue(body["session_id"])
+        self.assertEqual(body["cards"][0]["kind"], "profile")
+        self.assertEqual(body["cards"][0]["target"], {"kind": "group", "id": "DC02"})
+        self.assertTrue(body["cards"][0]["node"])
+        session = self.client.get("/api/chat/sessions/" + body["session_id"]).json()
+        self.assertEqual(session["turns"][0]["question"], "看看 DC02 最近一次测验")
+        self.assertEqual(session["context"]["group"], "DC02")
+        follow = self.client.post("/api/learning-chat", json={
+            "question": "D01 的表现怎么样", "session_id": body["session_id"],
+        })
+        self.assertEqual(follow.status_code, 200, follow.text)
+        self.assertEqual(follow.json()["cards"][0]["target"], {"kind": "student", "id": "D01"})
+        self.assertEqual(follow.json()["context"]["student"], "D01")
+        self.assertEqual(follow.json()["context"]["group"], "")
+        self.assertEqual(self.client.get("/api/chat/sessions/missing").status_code, 404)
+
+    def test_recommendation_proposal_is_idempotent_and_detects_stale_snapshot(self):
+        batch = self.post_import()
+        self.run_cleaning(batch["run_id"])
+        first_snapshot = self.confirm(batch).json()["snapshot_id"]
+        with patch("backend.main.api_key", return_value="configured"):
+            chat = self.client.post("/api/learning-chat", json={"question": "帮我生成 D01 的学习建议"})
+            self.assertEqual(chat.status_code, 200, chat.text)
+            proposal = chat.json()["cards"][0]
+            self.assertEqual(proposal["action"], "generate_recommendation")
+            confirmed = self.client.post(f"/api/chat/proposals/{proposal['id']}/confirm")
+            self.assertEqual(confirmed.status_code, 200, confirmed.text)
+            again = self.client.post(f"/api/chat/proposals/{proposal['id']}/confirm")
+            self.assertEqual(again.json()["result"], confirmed.json()["result"])
+            self.assertEqual(again.json()["result"]["snapshot_id"], first_snapshot)
+
+            stale = self.client.post("/api/learning-chat", json={"question": "帮我生成 D14 的学习建议"})
+            stale_proposal = stale.json()["cards"][0]
+            next_batch = self.post_import()
+            self.run_cleaning(next_batch["run_id"])
+            newer = self.confirm(next_batch).json()["snapshot_id"]
+            self.assertNotEqual(newer, first_snapshot)
+            rejected = self.client.post(f"/api/chat/proposals/{stale_proposal['id']}/confirm")
+            self.assertEqual(rejected.status_code, 409)
+            detail = rejected.json()["detail"]
+            self.assertTrue(detail["snapshot_changed"])
+            self.assertEqual(detail["current_snapshot_id"], newer)
+            refreshed = self.client.post(f"/api/chat/proposals/{stale_proposal['id']}/refresh")
+            self.assertEqual(refreshed.status_code, 200, refreshed.text)
+            self.assertEqual(refreshed.json()["payload"]["snapshot_id"], newer)
+            accepted = self.client.post(f"/api/chat/proposals/{stale_proposal['id']}/confirm")
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            self.assertEqual(accepted.json()["result"]["snapshot_id"], newer)
+
+    def test_onboarding_follows_real_state_and_can_be_reopened(self):
+        self.assertEqual(self.client.get("/api/onboarding").json()["state"], "empty")
+        batch = self.post_import()
+        self.run_cleaning(batch["run_id"])
+        review = self.client.get("/api/onboarding").json()
+        self.assertEqual(review["state"], "review")
+        self.assertEqual(review["detail"]["batch_id"], batch["batch_id"])
+        self.assertEqual(review["detail"]["proposal"]["action"], "confirm_import")
+        confirmed = self.confirm(batch).json()["snapshot_id"]
+        state = self.client.get("/api/onboarding").json()
+        self.assertEqual(state["state"], "confirmed")
+        self.assertEqual(state["detail"]["snapshot_id"], confirmed)
+        rows = self.client.get("/api/profiles/evidence", params={
+            "snapshot_id": confirmed, "student": "D01", "node": "N01", "indicator": "T01I2"}).json()
+        self.assertTrue(rows)
+        viewed = self.client.get("/api/onboarding").json()
+        self.assertEqual(viewed["state"], "viewed_answer")
+        self.assertEqual(viewed["detail"]["student"], "D01")
+        with store.db() as conn:
+            draft = {"id": "approved-draft", "snapshot_id": confirmed, "approved": True, "revision": 1}
+            store.put(conn, "draft", draft["id"], draft)
+        completed = self.client.get("/api/onboarding").json()
+        self.assertEqual(completed["state"], "completed")
+        self.assertTrue(completed["completed"])
+        reopened = self.client.post("/api/onboarding/reopen").json()
+        self.assertFalse(reopened["dismissed"])
+        self.assertFalse(reopened["completed"])
+        self.assertEqual(reopened["state"], "viewed_answer")
+        self.assertTrue(self.client.post("/api/onboarding/dismiss", json={"permanent": True}).json()["dismissed"])
+        self.assertTrue(self.client.get("/api/onboarding").json()["dismissed"])
+
+    def test_cleaning_issue_export_can_target_a_pending_run(self):
+        batch = self.post_import()
+        self.run_cleaning(batch["run_id"])
+        response = self.client.get("/api/imports/issues.csv", params={"run_id": batch["run_id"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("reason", response.text)
+        self.assertEqual(self.client.get("/api/imports/issues.csv", params={"run_id": "missing"}).status_code, 404)

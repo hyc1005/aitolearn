@@ -52,6 +52,7 @@ export function ReviewPanel({ review, openRef, canOpenRef, collapseDetails }: {
 
 type Props = {
   jobs: Row[]; detail?: Row; runId: string; loading: boolean; error: string; legacy: boolean
+  caseAvailable: boolean
   open: (key: string) => void; migrate: () => void; confirm: () => void; rebase: () => void
   retry: () => void; openDraft: (key: string) => void; openImport: () => void; openReplay: () => void
 }
@@ -62,7 +63,7 @@ export default function AgentWorkbench(props: Props) {
   const priority = (item: Row) => item.stage === 'confirm' && item.state === 'done' ? 0 :
     ['running', 'queued'].includes(item.state) ? 1 : item.state === 'failed' ? 2 : 3
   if (!runId) return <Card title="运行记录" extra={<Space wrap>
-    <Button onClick={props.openReplay}>Q015 案例回放</Button>
+    {props.caseAvailable && <Button onClick={props.openReplay}>Q015 案例回放</Button>}
     {props.legacy && <Button onClick={props.migrate} loading={props.loading}>迁移历史批次</Button>}
     <Button type="primary" onClick={props.openImport}>导入学情</Button>
   </Space>}>
@@ -93,7 +94,8 @@ export default function AgentWorkbench(props: Props) {
   const selectedIssue = report?.issues.find((issue: Row) => issue.id === activeRef)
   return <>
     <Card title={runNames[run.kind] + ' · ' + (run.payload.label || run.payload.student || run.payload.group || '')}
-      extra={<Button onClick={() => props.open('')}>返回运行记录</Button>}>
+      extra={<Space wrap>{props.caseAvailable && <Button onClick={props.openReplay}>Q015 案例回放</Button>}
+        <Button onClick={() => props.open('')}>返回运行记录</Button></Space>}>
       <Steps current={current} items={order.map(stage => ({
         title: clean && stage === 'published' ? '快照生效' : stageNames[stage],
         status: run.stage === stage && run.state === 'failed' ? 'error' :
@@ -115,7 +117,8 @@ export default function AgentWorkbench(props: Props) {
         {!!run.payload.material_ids?.length && <div>资料版本 {run.payload.material_ids.join('、')}</div>}
       </details>
     </Card>
-    {report && <Card title="Python 清洗结果" extra={<Tag>规则 {stages.python.rules_version}</Tag>}>
+    {report && <Card title="Python 清洗结果" extra={<Space wrap><Tag>规则 {stages.python.rules_version}</Tag>
+      <Button href={'/api/imports/issues.csv?run_id=' + run.id}>下载异常 CSV</Button></Space>}>
       <CleaningCounts report={report} />
       <Table<Row> size="small" rowKey="id" dataSource={report.issues} columns={[
         { title: '编号', dataIndex: 'id' }, { title: '文件与原始行', render: (_, row) => [row.source, row.sheet, '第 ' + row.line + ' 行'].filter(Boolean).join(' · ') },

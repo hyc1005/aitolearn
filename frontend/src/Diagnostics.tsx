@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Button, Drawer, Empty, Grid, Select, Segmented, Skeleton, Space } from 'antd'
-import { ArrowRightOutlined, CloseOutlined, PlayCircleOutlined, UploadOutlined } from '@ant-design/icons'
+import { ArrowRightOutlined, CloseOutlined, UploadOutlined } from '@ant-design/icons'
 
 export type DiagnosticAxis = {
   id: string
@@ -27,10 +27,10 @@ export type DiagnosticSelection = { group: string; node: string; indicator: stri
 type CellKey = Omit<DiagnosticSelection, 'snapshot_id'>
 type Mode = '课程顺序' | '班级差异' | '覆盖情况'
 
-export function Diagnostics({ data, count, attempts, active, busy, api, openReplay, openImport, openEvidence, openStudent, openGroup, launchGroup }: {
+export function Diagnostics({ data, count, attempts, active, busy, api, openImport, openEvidence, openStudent, openGroup, launchGroup }: {
   data?: Profile; count: number; attempts?: number; active: boolean; busy: boolean
   api: <T>(url: string, options?: RequestInit) => Promise<T>
-  openReplay: () => void; openImport: () => void
+  openImport: () => void
   openEvidence: (target: DiagnosticSelection & { student: string; axis: DiagnosticAxis }) => void
   openStudent: (student: string, node: string, snapshot: string, indicator: string) => void
   openGroup: (group: string, node: string, snapshot: string, indicator: string) => void
@@ -156,8 +156,7 @@ export function Diagnostics({ data, count, attempts, active, busy, api, openRepl
       <div><h1>班级诊断</h1><p>{count} 名学生 <span>·</span> {groups.length} 个班级 <span>·</span> {nodes.length} 次测验
         {attempts !== undefined && <> <span>·</span> {attempts} 条有效作答</>}
         {snapshot && <span className="snapshot-status">已确认快照</span>}</p></div>
-      <Space wrap><Button icon={<UploadOutlined />} onClick={openImport}>导入学情</Button>
-        <Button type="primary" loading={busy} icon={<PlayCircleOutlined />} onClick={openReplay}>进入案例串讲</Button></Space>
+      <Space wrap><Button icon={<UploadOutlined />} onClick={openImport}>导入学情</Button></Space>
     </section>
     {!snapshot ? <div className="diagnostic-panel"><Empty description={data ? '导入作答并确认快照后查看班级诊断' : '正在读取班级诊断'} /></div> :
     <div className={'diagnostic-layout' + (selectedAxis && !useDrawer ? ' has-evidence' : '')}>

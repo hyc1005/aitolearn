@@ -18,6 +18,9 @@ from keyring.errors import KeyringError
 from pydantic import BaseModel, Field, SecretStr
 
 from .agent import api_key
+from .conversation import (cleaning_card, deterministic, latest_clean, make_proposal, onboarding,
+                           proposal_card, resolve, resolve_recommendation, save_session, session_view,
+                           settings_get, settings_put)
 from .data import profile, read_file, student_scores
 from .learning_chat import ChatRequest, collect_sources, reply
 from .models import KEY_SERVICE, PROVIDERS, active_provider, complete, provider_config, provider_key
@@ -126,19 +129,163 @@ def test_model_connection(provider: str):
 def learning_chat(request: ChatRequest):
     if not request.question.strip() or any(isinstance(turn, str) and len(turn) > 1200 for turn in request.history):
         raise HTTPException(422, "请输入问题，单条最多 1200 字")
-    if (request.student or request.node) and not request.snapshot_id:
-        raise HTTPException(422, "请先确认数据快照")
-    try:
+    if (request.student or request.group or request.node) and not request.snapshot_id:
         with db() as conn:
-            snapshot = require(conn, "snapshot", request.snapshot_id) if request.snapshot_id else None
-            sources = collect_sources(conn, snapshot, request)
-    except ValueError as error:
-        raise HTTPException(422, str(error)) from None
-    try:
-        result = reply(request, sources, new_id())
-    except ValueError as error:
-        raise HTTPException(502, str(error)) from None
-    return {**result, "snapshot_id": request.snapshot_id}
+            active = current_snapshot(conn)
+            if active:
+                request.snapshot_id = active["id"]
+    with db() as conn:
+        session = get(conn, "chat_session", request.session_id) if request.session_id else None
+        if session and not request.history:
+            request.history = [{"question": turn["question"], "answer": turn.get("answer", "")[:1200]}
+                               for turn in session.get("turns", [])[-5:] if turn.get("answer")]
+        if session:
+            context = session.get("context", {})
+            request.student = request.student or context.get("student", "")
+            request.group = request.group or context.get("group", "")
+            request.node = request.node or context.get("node", "")
+        snapshot = require(conn, "snapshot", request.snapshot_id) if request.snapshot_id else None
+        result = deterministic(conn, request)
+        if result is None:
+            try:
+                sources = collect_sources(conn, snapshot, request)
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from None
+            try:
+                result = reply(request, sources, new_id())
+            except ValueError as error:
+                raise HTTPException(502, str(error)) from None
+            proposal = result.pop("proposal", None) if isinstance(result, dict) else None
+            if proposal and snapshot:
+                data = table_data(snapshot)
+                resolved = resolve(data, request.question,
+                                   {"student": request.student, "group": request.group, "node": request.node})
+                resolved.update({key: proposal.get(key) or resolved.get(key, "")
+                                 for key in ("student", "group", "node")})
+                payload, card = resolve_recommendation(data, snapshot["id"], resolved, request.anchor_event)
+                if payload:
+                    item = make_proposal(conn, "generate_recommendation", payload, title="生成学习建议")
+                    result["cards"] = [proposal_card(item)]
+                elif card:
+                    result["cards"] = [card]
+        result.setdefault("parts", [])
+        result.setdefault("cards", [])
+        active = current_snapshot(conn)
+        result["snapshot_id"] = active["id"] if active else ""
+        saved = save_session(conn, request.session_id, request, result)
+        return {**result, "session_id": saved["id"], "context": saved["context"]}
+
+
+@app.get("/api/chat/sessions/{key}")
+def chat_session(key: str):
+    with db() as conn:
+        session = session_view(conn, key)
+        if session is None:
+            raise HTTPException(404, "对话不存在")
+        return session
+
+
+@app.get("/api/chat/proposals/{key}")
+def chat_proposal(key: str):
+    with db() as conn:
+        item = require(conn, "proposal", key)
+        return proposal_card(item)
+
+
+@app.post("/api/chat/proposals/{key}/confirm")
+def confirm_proposal(key: str):
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        proposal = require(conn, "proposal", key)
+        if proposal.get("status") == "confirmed" and proposal.get("result") is not None:
+            return {"proposal": proposal_card(proposal), "result": proposal["result"]}
+        payload = proposal["payload"]
+        if proposal["kind"] == "confirm_import":
+            run = require(conn, "job", payload["run_id"])
+            batch = require(conn, "import", payload["batch_id"])
+            if run.get("stage") == "published":
+                result = run.get("result") or {}
+                proposal.update(status="confirmed", result=result, confirmed_at=time.time())
+                put(conn, "proposal", key, proposal)
+                return {"proposal": proposal_card(proposal), "result": result}
+            active = current_snapshot(conn)
+            baseline = run["payload"]["base_snapshot_id"]
+            if baseline != (active["id"] if active else None) or (
+                    active is None and run["payload"]["legacy_baseline"] != legacy_batches(conn)):
+                raise HTTPException(409, {"message": "基础数据已变更，请按当前数据重新运行清洗",
+                                          "snapshot_changed": True,
+                                          "current_snapshot_id": active["id"] if active else None})
+            result = confirm_batch(conn, payload["batch_id"], payload["run_id"])
+            proposal.update(status="confirmed", result=result, confirmed_at=time.time())
+            put(conn, "proposal", key, proposal)
+            return {"proposal": proposal_card(proposal), "result": result}
+        if proposal["kind"] == "generate_recommendation":
+            active = current_snapshot(conn)
+            if not active or payload.get("snapshot_id") != active["id"]:
+                raise HTTPException(409, {
+                    "message": "数据快照已更新，请按新快照重新确认",
+                    "snapshot_changed": True,
+                    "current_snapshot_id": active["id"] if active else None,
+                })
+            run = create_run(conn, Run(student=payload.get("student", ""), group=payload.get("group", ""),
+                                       node=payload.get("node", ""), anchor_event=payload.get("anchor_event", ""),
+                                       snapshot_id=payload.get("snapshot_id", "")))
+            result = {"run_id": run["id"], "snapshot_id": active["id"]}
+            proposal.update(status="confirmed", result=result, confirmed_at=time.time())
+            put(conn, "proposal", key, proposal)
+            return {"proposal": proposal_card(proposal), "result": result}
+        raise HTTPException(400, "不支持的操作类型")
+
+
+@app.post("/api/chat/proposals/{key}/refresh")
+def refresh_proposal(key: str):
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        proposal = require(conn, "proposal", key)
+        if proposal.get("status") == "confirmed":
+            return proposal_card(proposal)
+        if proposal["kind"] != "generate_recommendation":
+            raise HTTPException(409, "该操作无法自动换成新快照，请重新发起")
+        active = current_snapshot(conn)
+        if not active:
+            raise HTTPException(409, "尚未确认数据快照")
+        data = table_data(active)
+        payload = proposal["payload"]
+        resolved = resolve(data, "", {"student": payload.get("student", ""),
+                                      "group": payload.get("group", ""), "node": payload.get("node", "")})
+        fresh, card = resolve_recommendation(data, active["id"], resolved, payload.get("anchor_event", ""))
+        if not fresh:
+            raise HTTPException(409, card.get("prompt", "对象已不存在"))
+        proposal["payload"] = fresh
+        proposal["status"] = "pending"
+        put(conn, "proposal", key, proposal)
+        return proposal_card(proposal)
+
+
+@app.get("/api/onboarding")
+def onboarding_state():
+    with db() as conn:
+        return onboarding(conn)
+
+
+class OnboardingChoice(BaseModel):
+    permanent: bool = False
+
+
+@app.post("/api/onboarding/dismiss")
+def onboarding_dismiss(choice: OnboardingChoice):
+    with db() as conn:
+        settings_put(conn, "onboarding", {"dismissed": choice.permanent, "completed": choice.permanent,
+                                          "at": time.time()})
+        return onboarding(conn)
+
+
+@app.post("/api/onboarding/reopen")
+def onboarding_reopen():
+    with db() as conn:
+        settings_put(conn, "onboarding", {"dismissed": False, "completed": False, "reopened": True,
+                                          "at": time.time()})
+        return onboarding(conn)
 
 
 @app.get("/api/jobs")
@@ -308,28 +455,32 @@ def rebase_import(key: str):
         return cleaning_run(queue_cleaning(conn, batch))
 
 
+def confirm_batch(conn, key, run_id):
+    item = require(conn, "import", key)
+    run = require(conn, "job", run_id)
+    if run["kind"] != "clean" or run["payload"]["batch_id"] != key:
+        raise HTTPException(409, "任务与批次不匹配")
+    if run.get("stage") == "published":
+        return run["result"]
+    if run["state"] != "done" or run.get("stage") != "confirm":
+        raise HTTPException(409, "请先完成模型清洗复核")
+    active = current_snapshot(conn)
+    baseline = run["payload"]["base_snapshot_id"]
+    if baseline != (active["id"] if active else None) or (
+            active is None and run["payload"]["legacy_baseline"] != legacy_batches(conn)):
+        raise HTTPException(409, "基础数据已变更，请按当前数据重新运行清洗")
+    new_snapshot = require(conn, "snapshot", run["result"]["snapshot_id"])
+    put(conn, "settings", "active_snapshot", {"id": new_snapshot["id"], "review_run_id": run_id})
+    put(conn, "import", key, {**item, "confirmed": True, "snapshot_id": new_snapshot["id"]})
+    put(conn, "job", run_id, {**run, "stage": "published", "confirmed_at": time.time()})
+    return run["result"]
+
+
 @app.post("/api/imports/{key}/confirm")
 def confirm(key: str, run_id: str):
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        item = require(conn, "import", key)
-        run = require(conn, "job", run_id)
-        if run["kind"] != "clean" or run["payload"]["batch_id"] != key:
-            raise HTTPException(409, "任务与批次不匹配")
-        if run.get("stage") == "published":
-            return run["result"]
-        if run["state"] != "done" or run.get("stage") != "confirm":
-            raise HTTPException(409, "请先完成模型清洗复核")
-        active = current_snapshot(conn)
-        baseline = run["payload"]["base_snapshot_id"]
-        if baseline != (active["id"] if active else None) or (
-                active is None and run["payload"]["legacy_baseline"] != legacy_batches(conn)):
-            raise HTTPException(409, "基础数据已变更，请按当前数据重新运行清洗")
-        new_snapshot = require(conn, "snapshot", run["result"]["snapshot_id"])
-        put(conn, "settings", "active_snapshot", {"id": new_snapshot["id"], "review_run_id": run_id})
-        put(conn, "import", key, {**item, "confirmed": True, "snapshot_id": new_snapshot["id"]})
-        put(conn, "job", run_id, {**run, "stage": "published", "confirmed_at": time.time()})
-        return run["result"]
+        return confirm_batch(conn, key, run_id)
 
 
 def cleaning_report(conn):
@@ -387,9 +538,17 @@ def correct_record(edit: Correction):
 
 
 @app.get("/api/imports/issues.csv")
-def issues_csv():
+def issues_csv(run_id: str = ""):
     with db() as conn:
-        report = cleaning_report(conn)
+        if run_id:
+            run = require(conn, "job", run_id)
+            snapshot_id = ((run.get("stages") or {}).get("python") or {}).get("snapshot_id")
+            snapshot = require(conn, "snapshot", snapshot_id) if snapshot_id else None
+            if not snapshot:
+                raise HTTPException(404, "该运行尚无清洗结果")
+            report = {**snapshot["report"], "snapshot_id": snapshot_id}
+        else:
+            report = cleaning_report(conn)
         issues = [{"snapshot_id": report["snapshot_id"], **issue} for issue in report["issues"]]
     return csv_response(issues, "cleaning-issues.csv")
 
@@ -431,13 +590,22 @@ def profiles(student: str = "", group: str = "", node: str = "", snapshot_id: st
 @app.get("/api/profiles/evidence")
 def evidence(indicator: str, student: str = "", group: str = "", node: str = "", snapshot_id: str = ""):
     with db() as conn:
-        data = table_data(require(conn, "snapshot", snapshot_id) if snapshot_id else current_snapshot(conn))
+        active = require(conn, "snapshot", snapshot_id) if snapshot_id else current_snapshot(conn)
+        data = table_data(active)
     snapshot = profile(data, student, group, node)
     selected = next((a for a in snapshot["axes"] + snapshot["topics"] if a["id"] == indicator), None)
     if selected is None:
         raise HTTPException(404, "指标不存在")
-    return [{**row, "题目": data["题目与材料"][row["材料编号"]]} for key in selected["attempt_ids"]
+    rows = [{**row, "题目": data["题目与材料"][row["材料编号"]]} for key in selected["attempt_ids"]
             if (row := data["作答记录"].get(key))]
+    if student and rows and active:
+        with db() as conn:
+            settings_put(conn, "onboarding_viewed_answer", {
+                "snapshot_id": active["id"], "student": student, "node": node,
+                "indicator": indicator, "event": rows[0]["作答事件编号"],
+                "group": data["模拟学生"].get(student, {}).get("模拟班级编号", ""),
+            })
+    return rows
 
 
 @app.get("/api/profiles/distribution")
@@ -558,34 +726,38 @@ class Run(BaseModel):
     snapshot_id: str = ""
 
 
+def create_run(conn, data):
+    snapshot = current_snapshot(conn)
+    if not snapshot:
+        raise HTTPException(409, "请先确认数据快照")
+    if data.snapshot_id and data.snapshot_id != snapshot["id"]:
+        raise HTTPException(409, "数据快照已更新，请刷新画像后重新发起")
+    source = table_data(snapshot)
+    if not api_key(conn):
+        raise HTTPException(400, "请先在模型接入中配置 API 密钥")
+    if bool(data.student) == bool(data.group):
+        raise HTTPException(400, "请选择单个学生或班级")
+    if (data.student and data.student not in source["模拟学生"]) or (
+        data.group and data.group not in {r["模拟班级编号"] for r in source["模拟学生"].values()}
+    ) or (data.node and data.node not in source["测验节点"]):
+        raise HTTPException(404, "学生、班级或测验不存在")
+    if data.anchor_event:
+        row = source["作答记录"].get(data.anchor_event)
+        if (not row or not data.student or row["学生编号"] != data.student
+                or row["评分状态"] != "已评分" or not row["指标"]
+                or (data.node and row["节点编号"] != data.node)):
+            raise HTTPException(400, "指定作答不属于当前学生和测验的有效证据")
+    material_ids = [doc["id"] for doc in all_of(conn, "material") if doc["state"] == "published"]
+    item = job(conn, "generate", {**data.model_dump(), "snapshot_id": snapshot["id"],
+                                  "material_ids": material_ids})
+    return {**item, "run_id": item["id"]}
+
+
 @app.post("/api/agent/runs")
 def start_run(data: Run):
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        snapshot = current_snapshot(conn)
-        if not snapshot:
-            raise HTTPException(409, "请先确认数据快照")
-        if data.snapshot_id and data.snapshot_id != snapshot["id"]:
-            raise HTTPException(409, "数据快照已更新，请刷新画像后重新发起")
-        source = table_data(snapshot)
-        if not api_key(conn):
-            raise HTTPException(400, "请先在模型接入中配置 API 密钥")
-        if bool(data.student) == bool(data.group):
-            raise HTTPException(400, "请选择单个学生或班级")
-        if (data.student and data.student not in source["模拟学生"]) or (
-            data.group and data.group not in {r["模拟班级编号"] for r in source["模拟学生"].values()}
-        ) or (data.node and data.node not in source["测验节点"]):
-            raise HTTPException(404, "学生、班级或测验不存在")
-        if data.anchor_event:
-            row = source["作答记录"].get(data.anchor_event)
-            if (not row or not data.student or row["学生编号"] != data.student
-                    or row["评分状态"] != "已评分" or not row["指标"]
-                    or (data.node and row["节点编号"] != data.node)):
-                raise HTTPException(400, "指定作答不属于当前学生和测验的有效证据")
-        material_ids = [doc["id"] for doc in all_of(conn, "material") if doc["state"] == "published"]
-        item = job(conn, "generate", {**data.model_dump(), "snapshot_id": snapshot["id"],
-                                      "material_ids": material_ids})
-        return {**item, "run_id": item["id"]}
+        return create_run(conn, data)
 
 
 @app.get("/api/recommendations")

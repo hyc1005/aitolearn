@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Select, Skeleton, Space, Table, Tag, Tooltip, Typography, theme } from 'antd'
+import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Select, Skeleton, Space, Steps, Table, Tag, Tooltip, Typography, theme } from 'antd'
 import { BookOutlined } from '@ant-design/icons'
 import { NavIcon } from './NavIcon'
 import zhCN from 'antd/locale/zh_CN'
@@ -24,24 +24,25 @@ type Row = Record<string, any>
 type Axis = { id: string; label: string; score: number | null; n: number; coverage: number; population: number; status: string; earned: number; possible: number; distribution: number[] }
 const noAxes: Axis[] = []
 const pages = [
-  ['overview', '班级诊断'], ['chat', '学情对话'], ['models', '模型接入'], ['agent', 'Agent 工作台'],
-  ['import', '导入与清洗'], ['materials', '课程与资料'], ['student', '画像'],
-  ['drafts', '学习建议'], ['settings', '任务与设置'],
+  ['chat', '学情对话'], ['import', '数据导入'], ['materials', '课程与资料'], ['overview', '班级诊断'],
+  ['student', '画像'], ['drafts', '学习建议'], ['settings', '设置'],
 ] as const
+const pageKeys = new Set<string>(pages.map(([key]) => key))
 type ProfileTarget = { kind: 'student' | 'group'; id: string }
 const mobileSidebarQuery = '(max-width: 800px)'
-const sidebarPreference = 'aitolearn.sidebar.collapsed'
+const sidebarPreference = 'aitolearn.sidebar.collapsed.v2'
 function pageFromHash() {
-  if (location.hash.startsWith('#agent')) return 'agent'
-  if (location.hash === '#chat') return 'chat'
-  if (location.hash === '#models') return 'models'
-  return 'overview'
+  if (location.hash.startsWith('#agent')) return 'run'
+  if (location.hash === '#models') return 'settings'
+  const key = location.hash.replace(/^#/, '').split('/')[0]
+  return pageKeys.has(key) ? key : 'chat'
 }
 async function api<T = any>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch('/api' + path, options)
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(typeof body.detail === 'string' ? body.detail : '操作失败，请检查输入或服务状态')
+    throw new Error(typeof body.detail === 'string' ? body.detail
+      : body.detail ? JSON.stringify(body.detail) : '操作失败，请检查输入或服务状态')
   }
   return response.json()
 }
@@ -165,7 +166,10 @@ function Workbench() {
   }, [])
   const [runId, setRunId] = useState(() => /^#agent\/([a-f0-9]+)$/.exec(location.hash)?.[1] || '')
   const [runDetail, setRunDetail] = useState<Row>()
+  const [cleanDetail, setCleanDetail] = useState<Row>()
   const [runError, setRunError] = useState('')
+  const [caseAvailable, setCaseAvailable] = useState(false)
+  const [onboardingSignal, setOnboardingSignal] = useState(0)
   const [replay, setReplay] = useState<CaseData>()
   const [data, setData] = useState<Row>({})
   const [target, setTarget] = useState<ProfileTarget>()
@@ -182,6 +186,7 @@ function Workbench() {
   const [modelAccess, setModelAccess] = useState<ModelAccess>()
   const [report, setReport] = useState<Row>()
   const [files, setFiles] = useState<File[]>([])
+  const importInput = useRef<HTMLInputElement>(null)
   const [correction, setCorrection] = useState<Row>()
   const [corrected, setCorrected] = useState('{}')
   const [mapping, setMapping] = useState('{}')
@@ -209,21 +214,29 @@ function Workbench() {
     setReport(r); setMaterials(library); setCurriculum(map); setDrafts(list); setDeliveries(delivery); setHealth(status)
   }
   const goTo = (next: string) => {
-    if (next === 'agent' || next === 'chat' || next === 'models') location.hash = next
-    else if (location.hash) history.replaceState(null, '', location.pathname + location.search)
+    if (next === 'run') return
+    const fromModels = location.hash === '#models'
+    if (location.hash) history.replaceState(null, '', location.pathname + location.search + (next === 'chat' ? '' : '#' + next))
     setPage(next)
+    if (next === 'settings' && fromModels) {
+      requestAnimationFrame(() => document.getElementById('model-access')?.scrollIntoView({ block: 'start' }))
+    }
   }
   const openRun = (id: string) => {
-    location.hash = id ? 'agent/' + id : 'agent'
+    if (!id) { goTo('settings'); return }
+    location.hash = 'agent/' + id
     setRunId(id)
-    setPage('agent')
+    setPage('run')
   }
   async function perform(action: () => Promise<unknown>) {
     setBusy(true)
     try { await action() } catch (e) { message.error((e as Error).message) } finally { setBusy(false) }
   }
   useEffect(() => {
-    if (page === 'chat' || page === 'models') {
+    if (location.hash === '#models') requestAnimationFrame(() => document.getElementById('model-access')?.scrollIntoView({ block: 'start' }))
+  }, [page])
+  useEffect(() => {
+    if (page === 'chat' || page === 'settings' || page === 'run') {
       void api<ModelAccess>('/models/settings').then(setModelAccess).catch(error => message.error(error.message))
     }
   }, [page])
@@ -251,7 +264,7 @@ function Workbench() {
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
   useEffect(() => {
-    if (!runId || page !== 'agent') return
+    if (!runId || page !== 'run') return
     let active = true
     const load = async () => {
       try {
@@ -266,6 +279,20 @@ function Workbench() {
     const timer = setInterval(load, 1800)
     return () => { active = false; clearInterval(timer) }
   }, [runId, page])
+  const latestClean = useMemo(() => [...jobs].filter(job => job.kind === 'clean').sort((a, b) => b.created - a.created)[0], [jobs])
+  useEffect(() => {
+    if (!latestClean || !['import', 'chat', 'settings'].includes(page)) return
+    let active = true
+    void api('/agent/runs/' + latestClean.id).then(detail => { if (active) setCleanDetail(detail) }).catch(() => {})
+    return () => { active = false }
+  }, [latestClean?.id, latestClean?.state, latestClean?.stage, page])
+  useEffect(() => {
+    if (!['chat', 'settings', 'run', 'overview'].includes(page)) return
+    void api('/agent/cases/q015').then(result => {
+      setCaseAvailable(!!result?.snapshot_id && (result.steps || []).some((step: Row) =>
+        step.evidence || step.before || step.after || step.result))
+    }).catch(() => setCaseAvailable(false))
+  }, [page, report?.snapshot_id])
   const evidenceRequest = useRef(0)
   const profileRequestSnapshot = page === 'student' ? profileSnapshot : ''
   const requestedStudent = page === 'student' ? student : ''
@@ -376,6 +403,18 @@ function Workbench() {
     { label: '班级', options: groups.map(g => ({ value: 'group:' + g.group, label: g.group + ' · 班级' })) },
     { label: '学生', options: students.map(s => ({ value: 'student:' + s.学生编号, label: s.学生编号 + ' · ' + s.模拟班级编号 })) },
   ]
+  const confirmClean = (detail: Row) => perform(async () => {
+    await api('/imports/' + detail.payload.batch_id + '/confirm' + query({ run_id: detail.id }), post)
+    setRunDetail(await api('/agent/runs/' + detail.id))
+    await refresh()
+    setOnboardingSignal(value => value + 1)
+    message.success('已核对并启用这批数据')
+  })
+  const reopenOnboarding = () => perform(async () => {
+    await api('/onboarding/reopen', post)
+    setOnboardingSignal(value => value + 1)
+    message.success('已重新显示第一次使用引导')
+  })
   const navExpanded = mobile ? mobileOpen : !rail
   const navAction = navExpanded ? '收起导航' : '展开导航'
   const toggleNav = () => {
@@ -405,21 +444,27 @@ function Workbench() {
       </nav>
     </Layout.Sider>
     <Layout.Content className="content">
-      {page !== 'overview' && <header className="page-head"><Title level={2}>{pages.find(p => p[0] === page)?.[1]}</Title>
-        {page !== 'chat' && page !== 'models' && <Space><Button href="/api/export?format=json">导出 JSON</Button><Button href="/api/export?format=csv">导出 CSV</Button></Space>}</header>}
+      {page !== 'overview' && <header className="page-head"><Title level={2}>{page === 'run' ? '任务详情' : pages.find(p => p[0] === page)?.[1]}</Title>
+        {page === 'run' && <Button onClick={() => goTo('settings')}>返回设置中的任务记录</Button>}</header>}
       <Diagnostics active={page === 'overview'} data={data.groups && (!activeSnapshot || activeSnapshot === data.snapshot_id) ? data as Profile : undefined}
         count={students.length} attempts={report?.valid_scored} busy={busy} api={api}
-        openReplay={openReplay} openImport={() => goTo('import')} openEvidence={target => void readEvidence(target)}
+        openImport={() => goTo('import')} openEvidence={target => void readEvidence(target)}
         openStudent={(id, node, snapshot, indicator) => openProfile('student', id, node, snapshot, indicator)}
         openGroup={(id, node, snapshot, indicator) => openProfile('group', id, node, snapshot, indicator)}
         launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
       <div hidden={page !== 'chat'}>
-        <LearningChat key={activeSnapshot} snapshot={activeSnapshot}
+        <LearningChat snapshot={activeSnapshot}
           students={(data.snapshot_id === activeSnapshot ? students : []) as Parameters<typeof LearningChat>[0]['students']}
-          nodes={data.snapshot_id === activeSnapshot ? data.nodes : []} access={modelAccess} api={api} openAccess={() => goTo('models')} openCitation={setCitation} />
+          groups={(data.snapshot_id === activeSnapshot ? groups : []).map(group => group.group)}
+          nodes={data.snapshot_id === activeSnapshot ? data.nodes : []} access={modelAccess} api={api}
+          onboardingSignal={onboardingSignal}
+          openAccess={() => goTo('settings')} openCitation={setCitation} openImport={() => goTo('import')}
+          openRun={openRun} openDraft={id => { const found = drafts.find(d => d.id === id); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
+          openProfile={(kind, id, node, indicator) => openProfile(kind, id, node, activeSnapshot, indicator)}
+          onTaskStarted={() => { void refresh(); setOnboardingSignal(value => value + 1) }} />
       </div>
-      {page === 'models' && <ModelAccessPage access={modelAccess} api={api} update={setModelAccess} />}
-      {page === 'agent' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
+      {page === 'run' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
+        caseAvailable={caseAvailable}
         error={runError} loading={busy} legacy={!!report?.legacy_pending}
         open={openRun} openImport={() => goTo('import')}
         openReplay={openReplay}
@@ -432,15 +477,36 @@ function Workbench() {
           setRunDetail(await api('/agent/runs/' + runId)); await refresh(); message.success('已启用快照')
         })} />}
       {page === 'import' && <>
+        <Card title="当前步骤" extra={latestClean && <Button onClick={() => openRun(latestClean.id)}>查看任务详情</Button>}>
+          <Steps current={latestClean?.state === 'failed' ? 1 : cleanDetail?.stage === 'confirm' && cleanDetail.state === 'done' ? 2 :
+            report?.snapshot_id ? 3 : latestClean ? 1 : 0} items={[
+            { title: '选择文件' }, { title: '清洗与模型复核' }, { title: '核对并确认' }, { title: '快照生效' }]} />
+          <div className="spaced">
+            {latestClean?.state === 'failed' ? <Alert type="error" title={'本批清洗失败：' + (latestClean.error || '请查看任务详情')}
+              action={<Button onClick={() => openRun(latestClean.id)}>查看并重试</Button>} />
+              : cleanDetail?.stage === 'confirm' && cleanDetail.state === 'done' ? <Alert type="warning" title="清洗复核已完成，等待教师核对"
+                description={<CleaningCounts report={cleanDetail.report as Parameters<typeof CleaningCounts>[0]['report']} />}
+                action={<Button type="primary" loading={busy} onClick={() => confirmClean(cleanDetail)}>核对并确认本批数据</Button>} />
+              : latestClean && ['queued', 'running'].includes(latestClean.state) ? <Alert type="info" title="本批数据正在清洗"
+                description="可以查看真实计数、异常和复核状态。" action={<Button onClick={() => openRun(latestClean.id)}>查看本批进度</Button>} />
+              : report?.snapshot_id ? <Space wrap><Tag color="success">已确认快照</Tag>
+                <Button type="primary" onClick={() => goTo('overview')}>下一步 · 查看班级诊断</Button>
+                <Button onClick={() => goTo('materials')}>前往课程与资料</Button></Space>
+              : <Space wrap><Button type="primary" onClick={() => importInput.current?.click()}>选择本批文件</Button>
+                <Text type="secondary">支持 XLSX 工作簿，或名册、课程、测验、题目、作答五张 CSV。</Text></Space>}
+          </div>
+        </Card>
         <Card title="导入学情文件">
-          <Space wrap><Input type="file" multiple accept=".csv,.xlsx" onChange={e => setFiles(Array.from(e.target.files || []))} />
+          <input ref={importInput} type="file" hidden multiple accept=".csv,.xlsx" onChange={e => setFiles(Array.from(e.target.files || []))} />
+          <Space wrap><Button onClick={() => importInput.current?.click()}>选择文件</Button>
+            <Text>{files.length ? files.map(file => file.name).join('、') : '尚未选择文件'}</Text>
             <Button type="primary" loading={busy} disabled={!files.length} onClick={importFiles}>运行 Agent 清洗</Button>
           </Space>
           <details className="spaced"><summary>自定义列映射</summary><Input.TextArea value={mapping} onChange={e => setMapping(e.target.value)} placeholder='{"学号":"学生编号"}' /></details>
-          <Paragraph type="secondary" className="spaced">可上传 XLSX 工作簿或成组 CSV，也支持名册和总分。</Paragraph>
+          <Paragraph type="secondary" className="spaced">可上传 XLSX 工作簿或成组 CSV，也支持名册和总分。缺少文件时，清洗报告会列出无法关联的原始行。</Paragraph>
         </Card>
-        {report?.legacy_pending && <Alert type="info" message="已有历史批次，需迁移为快照后启用"
-          action={<Button onClick={() => goTo('agent')}>打开 Agent 工作台</Button>} />}
+        {report?.legacy_pending && <Alert type="info" title="已有历史批次，需迁移为快照后启用"
+          action={<Button onClick={() => goTo('settings')}>打开任务记录</Button>} />}
         {report && <Card title="清洗计数"><CleaningCounts report={report as Parameters<typeof CleaningCounts>[0]['report']} /></Card>}
         {cleaningAudit?.trace?.length > 0 && <Card title="Agent 清洗记录">
           <ReviewPanel review={cleaningAudit} collapseDetails={cleaningAudit.decision === 'ready'} />
@@ -474,6 +540,8 @@ function Workbench() {
         </Card>
         <Card title="检索已发布资料"><Input.Search value={lookup} onChange={e => setLookup(e.target.value)} onSearch={v => perform(async () => setHits(await api('/materials/search' + query({query: v})) ))} enterButton="查找" />
           {hits.map(h => <Paragraph key={h.id} className="spaced"><Button type="link" onClick={() => setCitation(h)}>{h.title} · {h.locator}</Button> {h.text.slice(0, 130)}</Paragraph>)}</Card>
+        <Card title="下一步" size="small"><Space wrap><Button type="primary" onClick={() => goTo('overview')}>前往班级诊断</Button>
+          <Button onClick={() => goTo('chat')}>回到学情对话</Button><Text type="secondary">课程与资料可以跳过，之后随时补充和发布。</Text></Space></Card>
       </>}
       {page === 'student' && <>
         <Card className="student-profile-card" title={target ? (student ? '学生 ' : '班级 ') + target.id : '学习表现'}
@@ -517,13 +585,28 @@ function Workbench() {
           { title: '学情概述', dataIndex: 'observation' }, { title: '状态', render: (_, d) => !d.snapshot_id ? '历史记录 · 版本未登记' : d.approved ? '已确认' : ({ pass: '待确认', revise: '已退回', pending: '待终审' } as Row)[d.review_state] },
           { title: '', render: (_, d) => <Button onClick={() => openDraft(d)}>打开</Button> },
         ]} /></Card>
-        <Card title="投递记录"><Table rowKey="id" dataSource={deliveries} columns={['student','group','state','message'].map((k,i) => ({ dataIndex: k, title: ['学生','收件群','状态','备注'][i] }))} /></Card>
+        {!!deliveries.length && <Card title="投递记录"><Table rowKey="id" dataSource={deliveries} columns={['student','group','state','message'].map((k,i) => ({ dataIndex: k, title: ['学生','收件群','状态','备注'][i] }))} /></Card>}
       </>}
       {page === 'settings' && <>
-        <Card title="本机依赖"><Space wrap><Button onClick={() => goTo('models')}>模型接入</Button><Tag color={health.ocr_configured ? 'success' : 'warning'}>PaddleOCR {health.ocr_configured ? '已配置' : '待安装'}</Tag></Space></Card>
-        <Card title="后台任务"><Table rowKey="id" dataSource={jobs} columns={[{ title: '类型', render: (_,j) => ({ extract:'解析资料', publish:'建立索引', ...runNames } as Row)[j.kind] },
-          { title: '状态', render: (_,j) => <Tag color={j.state === 'failed' ? 'error' : j.state === 'done' ? 'success' : 'processing'}>{({ queued:'排队', running:'处理中', done:'完成', failed:'失败' } as Row)[j.state]}</Tag> },
-          { title: '错误', dataIndex: 'error' }, { title: '操作', render: (_,j) => j.state === 'failed' ? <Button onClick={() => perform(() => api('/jobs/' + j.id + '/retry', post))}>重试</Button> : null }]} /></Card>
+        <Card id="model-access" title="模型接入">
+          <ModelAccessPage access={modelAccess} api={api} update={setModelAccess} />
+        </Card>
+        <Card title="后台任务" extra={<Text type="secondary">清洗与建议正在发起的位置同步显示进度</Text>}>
+          <Table<Row> rowKey="id" dataSource={jobs} columns={[{ title: '类型', render: (_,j) => ({ extract:'解析资料', publish:'建立索引', ...runNames } as Row)[j.kind] || j.kind },
+            { title: '对象', render: (_,j) => j.payload?.label || j.payload?.student || j.payload?.group || '' },
+            { title: '状态', render: (_,j) => <Tag color={j.state === 'failed' ? 'error' : j.state === 'done' ? 'success' : 'processing'}>{({ queued:'排队', running:'处理中', done:'完成', failed:'失败' } as Row)[j.state]}</Tag> },
+            { title: '错误', dataIndex: 'error' },
+            { title: '', render: (_,j) => <Space wrap>{['clean', 'generate', 'recommendation_review'].includes(j.kind) && <Button onClick={() => openRun(j.id)}>查看运行</Button>}
+              {j.state === 'failed' && <Button onClick={() => perform(() => api('/jobs/' + j.id + '/retry', post))}>重试</Button>}</Space> }]} />
+        </Card>
+        <Card title="运行环境"><Space wrap>
+          <Tag color={health.model_configured ? 'success' : 'warning'}>模型 {health.model_configured ? '已配置' : '待配置'}</Tag>
+          <Tag color={health.ocr_configured ? 'success' : 'warning'}>PaddleOCR {health.ocr_configured ? '已配置' : '待安装'}</Tag>
+          <Tag>SQLite 本机业务库</Tag>
+          <Tag>Windows 原生部署</Tag>
+        </Space></Card>
+        <Card title="使用引导"><Space wrap><Button onClick={reopenOnboarding}>重新显示「第一次使用」</Button>
+          <Text type="secondary">「稍后」只在本次会话隐藏，「已了解」跨刷新记忆。</Text></Space></Card>
       </>}
     </Layout.Content>
     <Drawer open={!!replay} title="演示串讲 · Q015" size="min(1100px, 100vw)" onClose={() => setReplay(undefined)}
