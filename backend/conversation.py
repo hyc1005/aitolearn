@@ -208,8 +208,8 @@ def deterministic(conn, request, snapshot):
     context = {"student": request.student, "group": getattr(request, "group", ""), "node": request.node}
     resolved = resolve(data, question, context) if data else {"candidates": []}
     if re.search(r"导入|上传", question) and not re.search(r"进度|查看|状态|确认|复核|异常|结果", question):
-        return {"answer": "请选择本批 XLSX 工作簿，或成组选择名册、课程、测验、题目、作答五张 CSV。",
-                "cards": [{"kind": "import", "title": "选择文件并开始清洗"}]}
+        return {"answer": "打开数据导入后，可以选择 XLSX 工作簿或成组的 CSV，并查看预检结果。",
+                "cards": [{"kind": "import"}]}
     if RECOMMEND.search(question):
         if not snapshot:
             return {"answer": "还没有确认的数据快照，请先导入并确认第一批数据。",
@@ -234,8 +234,8 @@ def deterministic(conn, request, snapshot):
     if CLEANING.search(question):
         run = latest_clean(conn)
         if run is None:
-            return {"answer": "还没有清洗批次。请选择 XLSX 工作簿或成组 CSV，系统会启动导入清洗。",
-                    "cards": [{"kind": "import", "title": "选择文件并开始清洗"}]}
+            return {"answer": "还没有清洗批次。可以前往数据导入选择文件，预检通过后开始清洗。",
+                    "cards": [{"kind": "import"}]}
         card, proposal = cleaning_card(conn, run)
         answer = {"queued": "本批数据正在排队清洗。", "running": "本批数据正在清洗，可查看当前阶段和计数。",
                   "failed": "本批清洗失败：" + (run.get("error") or "请查看任务详情") + "。可重试或修正文件后重新导入。",

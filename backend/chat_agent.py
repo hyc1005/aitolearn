@@ -19,7 +19,7 @@ CATALOG = {
     "read_evidence": ("读取本轮画像中指定指标的少量原始作答示例", {"indicator": "画像返回的指标编号"}),
     "search_materials": ("检索已发布教材、课程说明和题目", {"query": "要检索的教材概念或编号"}),
     "read_exercises": ("查询指定课程指标的练习题编号和题干", {"indicator": "课程指标编号"}),
-    "open_import": ("让教师选择学情文件并开始清洗", {}),
+    "open_import": ("提供前往数据导入页的入口", {}),
     "read_cleaning": ("查询本批清洗状态和可用确认操作", {}),
     "read_jobs": ("查看最近的后台任务编号、阶段和状态", {}),
     "propose_retry": ("为已失败任务准备重试提案", {"run_id": "工具返回的失败任务编号"}),
@@ -160,7 +160,7 @@ class ChatTools:
         return {"status": "ok", "count": len(sources), "sources": sources}
 
     def open_import(self):
-        return self.pause({"kind": "import", "navigate": True}, "请前往数据导入选择本批文件。")
+        return self.pause({"kind": "import"}, "打开数据导入后，可以选择文件并预检。")
 
     def read_exercises(self, indicator):
         if indicator not in self.data["课程要求"]:

@@ -7,6 +7,7 @@ import zhCN from 'antd/locale/zh_CN'
 import AgentWorkbench, { ReviewPanel, runNames } from './AgentWorkbench'
 import { CaseReplay, type CaseData } from './CaseReplay'
 import { CleaningCounts, issueFilters } from './CleaningCounts'
+import { ActiveStatus } from './ActiveStatus'
 import { Diagnostics, type DiagnosticSelection, type DiagnosticAxis, type Profile } from './Diagnostics'
 import { AnswerEvidence } from './AnswerEvidence'
 import { applyWorkbenchPalette, chartComparisonColor, workbenchTheme } from './workbenchTheme'
@@ -171,7 +172,6 @@ function Workbench() {
   const [previewBusy, setPreviewBusy] = useState(false)
   const [runError, setRunError] = useState('')
   const [caseAvailable, setCaseAvailable] = useState(false)
-  const [onboardingSignal, setOnboardingSignal] = useState(0)
   const [replay, setReplay] = useState<CaseData>()
   const [data, setData] = useState<Row>({})
   const [target, setTarget] = useState<ProfileTarget>()
@@ -427,13 +427,7 @@ function Workbench() {
     await api('/imports/' + detail.payload.batch_id + '/confirm' + query({ run_id: detail.id }), post)
     setRunDetail(await api('/agent/runs/' + detail.id))
     await refresh()
-    setOnboardingSignal(value => value + 1)
     message.success('已核对并启用这批数据')
-  })
-  const reopenOnboarding = () => perform(async () => {
-    await api('/onboarding/reopen', post)
-    setOnboardingSignal(value => value + 1)
-    message.success('已重新显示第一次使用引导')
   })
   const navExpanded = mobile ? mobileOpen : !rail
   const navAction = navExpanded ? '收起导航' : '展开导航'
@@ -464,7 +458,7 @@ function Workbench() {
       </nav>
     </Layout.Sider>
     <Layout.Content className="content">
-      {page !== 'overview' && <header className="page-head"><Title level={2}>{page === 'run' ? '任务详情' : pages.find(p => p[0] === page)?.[1]}</Title>
+      {page !== 'overview' && page !== 'chat' && <header className="page-head"><Title level={2}>{page === 'run' ? '任务详情' : pages.find(p => p[0] === page)?.[1]}</Title>
         {page === 'run' && <Button onClick={() => goTo('settings')}>返回设置中的任务记录</Button>}</header>}
       <Diagnostics active={page === 'overview'} data={data.groups && (!activeSnapshot || activeSnapshot === data.snapshot_id) ? data as Profile : undefined}
         count={students.length} attempts={report?.valid_scored} busy={busy} api={api}
@@ -473,16 +467,15 @@ function Workbench() {
         openGroup={(id, node, snapshot, indicator) => openProfile('group', id, node, snapshot, indicator)}
         launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
       <div hidden={page !== 'chat'}>
-        <LearningChat snapshot={activeSnapshot}
+        <LearningChat active={page === 'chat'} snapshot={activeSnapshot}
           students={(data.snapshot_id === activeSnapshot ? students : []) as Parameters<typeof LearningChat>[0]['students']}
           groups={(data.snapshot_id === activeSnapshot ? groups : []).map(group => group.group)}
           nodes={data.snapshot_id === activeSnapshot ? data.nodes : []} access={modelAccess} api={api}
-          onboardingSignal={onboardingSignal}
           openAccess={() => goTo('settings')} openCitation={setCitation} openImport={() => goTo('import')}
           openRun={openRun} openDraft={id => { const found = drafts.find(d => d.id === id); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
           openProfile={(kind, id, node, indicator, snapshot) => openProfile(kind, id, node, snapshot || activeSnapshot, indicator)}
           openPage={goTo}
-          onTaskStarted={() => { void refresh(); setOnboardingSignal(value => value + 1) }} />
+          onTaskStarted={() => { void refresh() }} />
       </div>
       {page === 'run' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
         caseAvailable={caseAvailable}
@@ -508,7 +501,8 @@ function Workbench() {
               : cleanDetail?.stage === 'confirm' && cleanDetail.state === 'done' ? <Alert type="warning" title="清洗复核已完成，等待教师核对"
                 description={<CleaningCounts report={cleanDetail.report as Parameters<typeof CleaningCounts>[0]['report']} />}
                 action={<Button type="primary" loading={busy} onClick={() => confirmClean(cleanDetail)}>核对并确认本批数据</Button>} />
-              : latestClean && ['queued', 'running'].includes(latestClean.state) ? <Alert type="info" title="本批数据正在清洗"
+              : latestClean && ['queued', 'running'].includes(latestClean.state) ? <Alert type="info" title={latestClean.state === 'running'
+                ? <ActiveStatus label="本批数据正在清洗或复核" /> : '本批数据正在排队'}
                 description="可以查看真实计数、异常和复核状态。" action={<Button onClick={() => openRun(latestClean.id)}>查看本批进度</Button>} />
               : report?.snapshot_id ? <Space wrap><Tag color="success">已确认快照</Tag>
                 <Button type="primary" onClick={() => goTo('chat')}>回到对话，问第一个问题</Button>
@@ -638,8 +632,7 @@ function Workbench() {
           <Tag>SQLite 本机业务库</Tag>
           <Tag>Windows 原生部署</Tag>
         </Space></Card>
-        <Card title="使用引导"><Space wrap><Button onClick={reopenOnboarding}>重新显示「第一次使用」</Button>
-          <Text type="secondary">「稍后」只在本次会话隐藏，「已了解」跨刷新记忆。</Text></Space></Card>
+        <Card title="使用引导"><Button onClick={() => goTo('import')}>查看数据导入步骤</Button></Card>
       </>}
     </Layout.Content>
     <Drawer open={!!replay} title="演示串讲 · Q015" size="min(1100px, 100vw)" onClose={() => setReplay(undefined)}

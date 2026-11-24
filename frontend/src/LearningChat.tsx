@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Alert, Button, Card, Drawer, Empty, Input, Popover, Select, Space, Tag, Typography } from 'antd'
 import { ArrowUpOutlined, CloseOutlined, PlusOutlined } from '@ant-design/icons'
+import { ActiveStatus } from './ActiveStatus'
 import { AnswerEvidence, type Answer } from './AnswerEvidence'
 import type { Api, ModelAccess } from './ModelAccess'
 
@@ -41,11 +42,10 @@ type Props = {
   openProfile: (kind: 'student' | 'group', id: string, node: string, indicator: string, snapshot?: string) => void
   openPage: (page: string) => void
   onTaskStarted: () => void
-  onboardingSignal?: number
+  active: boolean
 }
 
 const SESSION_KEY = 'aitolearn.chat.session'
-const LATER_KEY = 'aitolearn.onboarding.later'
 
 function read(key: string, storage: Storage) {
   try { return storage.getItem(key) || '' } catch { return '' }
@@ -63,32 +63,15 @@ export function LearningChat(props: Props) {
   const [busy, setBusy] = useState(false)
   const [sessionId, setSessionId] = useState(() => read(SESSION_KEY, localStorage))
   const [source, setSource] = useState<Answer>()
-  const [onboarding, setOnboarding] = useState<Onboarding>()
+  const [restoring, setRestoring] = useState(Boolean(sessionId))
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerKind, setPickerKind] = useState<'student' | 'group'>('student')
   const bottom = useRef<HTMLDivElement>(null)
-  const onboardingRequest = useRef(0)
+  const pendingProposals = useRef(new Set<string>())
   const provider = access?.providers.find(item => item.id === access.active)
   const contextLabel = context.student || context.group || ''
 
-  async function loadOnboarding() {
-    const request = ++onboardingRequest.current
-    try {
-      const state = await api<Onboarding>('/onboarding')
-      if (request === onboardingRequest.current) setOnboarding(state)
-    } catch { /* the card is optional */ }
-  }
-
   useEffect(() => {
-    if (!props.onboardingSignal) return
-    write(LATER_KEY, '', sessionStorage)
-    void loadOnboarding()
-    // Settings can reopen the card after it was acknowledged.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.onboardingSignal])
-
-  useEffect(() => {
-    void loadOnboarding()
     if (!sessionId) return
     let active = true
     void api(`/chat/sessions/${sessionId}`).then(session => {
@@ -100,15 +83,17 @@ export function LearningChat(props: Props) {
         result: { answer: turn.answer, parts: turn.parts || [], cards: turn.cards || [],
           trace: turn.trace, mode: turn.mode, snapshot_id: turn.snapshot_id, session_id: session.id },
       })))
-    }).catch(() => { setSessionId(''); write(SESSION_KEY, '', localStorage) })
+    }).catch(() => {
+      if (active) setSessionId('')
+    }).finally(() => { if (active) setRestoring(false) })
     return () => { active = false }
     // The session is restored once per page load.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
-    requestAnimationFrame(() => bottom.current?.scrollIntoView({ block: 'nearest' }))
-  }, [turns, busy])
+    if (props.active && turns.length) bottom.current?.scrollIntoView({ block: 'end' })
+  }, [turns.length, busy, props.active])
 
   const pollIds = useMemo(() => {
     const runIds = new Set<string>()
@@ -144,10 +129,9 @@ export function LearningChat(props: Props) {
   async function refreshProposalFor(runId: string) {
     try {
       const state = await api<Onboarding>('/onboarding')
-      setOnboarding(state)
       const proposal = state.detail?.proposal
       if (!proposal || state.detail?.run_id !== runId) return
-      setTurns(current => current.map(turn => !turn.result ? turn : {
+      setTurns(current => current.map(turn => !turn.result?.cards?.some(card => card.kind === 'cleaning' && card.run_id === runId) ? turn : {
         ...turn,
         result: { ...turn.result, cards: (turn.result.cards || []).some(card => card.id === proposal.id)
           ? turn.result.cards : [...(turn.result.cards || []), proposal] },
@@ -157,7 +141,7 @@ export function LearningChat(props: Props) {
 
   async function send(question: string, override?: Partial<Context>, history = turns) {
     question = question.trim()
-    if (!question || busy) return
+    if (!question || busy || restoring) return
     const outgoing: Context = { ...context, ...override }
     setBusy(true)
     setDraft('')
@@ -184,10 +168,8 @@ export function LearningChat(props: Props) {
       if (result.session_id) { setSessionId(result.session_id); write(SESSION_KEY, result.session_id, localStorage) }
       if (result.context) setContext({ ...result.context, anchor_event: '' })
       setTurns([...history, { question, context: outgoing, result }])
-      if (!props.snapshot && result.cards?.some(card => card.kind === 'import') && !result.cards.some(card => card.navigate))
+      if (!props.snapshot && result.cards?.some(card => card.kind === 'import'))
         write('aitolearn.import.question', question, sessionStorage)
-      if (result.cards?.some(card => card.kind === 'import' && card.navigate)) props.openImport()
-      void loadOnboarding()
     } catch (error) {
       setTurns([...history, { question, context: outgoing, error: (error as Error).message }])
     } finally { setBusy(false) }
@@ -204,6 +186,7 @@ export function LearningChat(props: Props) {
     setSessionId('')
     write(SESSION_KEY, '', localStorage)
     setDraft('')
+    setPickerOpen(false)
   }
 
 
@@ -218,12 +201,13 @@ export function LearningChat(props: Props) {
       const rows = await api(`/profiles/evidence?${new URLSearchParams({ student, group, node, indicator, item, snapshot_id: snapshot || props.snapshot || '' })}`)
       if (rows[0]) setSource(rows[0])
       else window.alert('该指标暂无有效作答')
-      void loadOnboarding()
     } catch (error) { window.alert((error as Error).message) }
   }
 
 
   async function confirmProposal(card: CardData) {
+    if (pendingProposals.current.has(card.id)) return
+    pendingProposals.current.add(card.id)
     try {
       const response = await api<any>(`/chat/proposals/${card.id}/confirm`, { method: 'POST' })
       setTurns(current => current.map(turn => !turn.result ? turn : {
@@ -251,6 +235,8 @@ export function LearningChat(props: Props) {
         return
       } catch { /* fall through to the plain error */ }
       window.alert(message)
+    } finally {
+      pendingProposals.current.delete(card.id)
     }
   }
 
@@ -272,41 +258,15 @@ export function LearningChat(props: Props) {
     if (question) { setDraft(question); write('aitolearn.import.question', '', sessionStorage) }
   }, [props.snapshot])
 
-  return <section className="learning-chat">
+  return <section aria-label="学情对话" className={turns.length ? "learning-chat" : "learning-chat chat-is-empty"}>
     <div className="chat-toolbar">
       <Space wrap>
-        <Popover trigger="click" open={pickerOpen} onOpenChange={setPickerOpen} content={<div className="context-picker">
-          <Select aria-label="上下文类型" value={pickerKind} onChange={value => setPickerKind(value)}
-            options={[{ value: 'student', label: '学生' }, { value: 'group', label: '班级' }]} />
-          <Select aria-label="选择上下文对象" showSearch={{ optionFilterProp: 'label' }} value={contextLabel || undefined}
-            placeholder={pickerKind === 'student' ? '搜索学生' : '选择班级'} style={{ minWidth: 190 }}
-            options={(pickerKind === 'student' ? students.map(row => ({
-              value: row.学生编号, label: row.学生编号 + ' · ' + row.模拟班级编号 })) :
-              groups.map(group => ({ value: group, label: group + ' · 班级' })))}
-            onChange={value => setTarget(pickerKind, value)} />
-          <Select aria-label="上下文测验" value={context.node || undefined} allowClear placeholder="全部测验" style={{ minWidth: 150 }}
-            onChange={node => setContext({ ...context, node: node || '', snapshot_id: props.snapshot })}
-            options={nodes.map(node => ({ value: node, label: node }))} />
-          <Typography.Text type="secondary">只影响后续消息，历史回答保留当时的对象和快照。</Typography.Text>
-        </div>}>
-          <Button icon={<PlusOutlined />}>添加上下文</Button>
-        </Popover>
-        {context.student && <Tag closable closeIcon={<CloseOutlined />} onClose={() => setContext({ ...context, student: '' })}>学生 {context.student}</Tag>}
-        {context.group && <Tag closable closeIcon={<CloseOutlined />} onClose={() => setContext({ ...context, group: '' })}>班级 {context.group}</Tag>}
-        {context.node && <Tag closable closeIcon={<CloseOutlined />} onClose={() => setContext({ ...context, node: '' })}>测验 {context.node}</Tag>}
-      </Space>
-      <Space wrap>
         <Button type="text" onClick={props.openAccess}>{provider ? provider.model + (provider.configured ? '' : ' · 待配置') : '模型接入'}</Button>
-        <Button disabled={busy || !turns.length} onClick={newChat}>新对话</Button>
+        <Button disabled={busy || restoring || (!turns.length && !draft && !contextLabel && !context.node)} onClick={newChat}>新对话</Button>
       </Space>
     </div>
-    {!props.snapshot && <Button type="link" onClick={props.openImport}>去导入数据</Button>}
-    {!turns.length && <div className="chat-empty">
-      <h2>今天想聊什么？</h2>
-      <p>{props.snapshot ? '直接提问。系统会从已确认数据解析学生、班级和测验；也可以先添加上下文。' : '可以直接提问，也可以先导入第一批学情数据。'}</p>
-      {props.snapshot && <Button onClick={() => setDraft('我们班最近一次测验，哪个指标最值得先讲？')}>试试询问班级学情</Button>}
-      {provider && !provider.configured && <p><Button onClick={props.openAccess}>配置模型</Button></p>}
-    </div>}
+    {restoring && <ActiveStatus label="正在恢复对话" />}
+    {!restoring && !turns.length && <h1 className="chat-welcome">今天想了解什么？</h1>}
     <div className="chat-thread" aria-label="学情对话记录">
       {turns.map((turn, index) => <article key={index} className="chat-turn">
         <p className="chat-question">{turn.question}</p>
@@ -317,21 +277,28 @@ export function LearningChat(props: Props) {
           {index === turns.length - 1 && <>
             <Space wrap>
               <Button disabled={busy} onClick={() => void send(turn.question, turn.context, turns.slice(0, index))}>重试</Button>
-              <Button onClick={props.openImport}>重新导入</Button>
             </Space>
           </>}
         </div> : turn.result ? <div>
           {turn.result.answer && <p className="preserve">{turn.result.answer}</p>}
-          {(turn.result.cards || []).map((card, cardIndex) => <ResultCard key={card.id || cardIndex} card={card}
-            api={api} snapshot={turn.result?.snapshot_id || props.snapshot} context={turn.context || context}
+          {(turn.result.cards || []).filter(card => card.kind !== 'profile').map((card, cardIndex) => <ResultCard key={card.id || cardIndex} card={card}
+            api={api} snapshot={turn.result?.snapshot_id || props.snapshot}
             readEvidence={readEvidence} confirmProposal={confirmProposal} chooseCandidate={chooseCandidate}
             openProfile={props.openProfile} openRun={props.openRun} openImport={props.openImport}
             openDraft={props.openDraft} openPage={props.openPage} />)}
-          {turn.result.mode === 'without_tools' && <Typography.Text type="secondary">当前模型提供普通对话，可用下方操作按钮继续。</Typography.Text>}
-          {!!turn.result.trace?.length && <details className="spaced"><summary>查看执行过程</summary>
-            <ol>{turn.result.trace.map((step, index) => <li key={index}>
+          {!!(turn.result.trace?.length || turn.result.cards?.some(card => card.kind === 'profile')) &&
+            <details className="chat-tool-details"><summary>{turn.result.cards?.filter(card => card.kind === 'profile')
+              .map(card => [card.target?.id, card.node].filter(Boolean).join(' / ')).join('、') || '工具调用'}
+              {!!turn.result.trace?.length && ' · ' + turn.result.trace.length + ' 步'}
+            </summary>
+            {(turn.result.cards || []).filter(card => card.kind === 'profile').map((card, cardIndex) =>
+              <ResultCard key={card.id || cardIndex} card={card} api={api} snapshot={turn.result?.snapshot_id || props.snapshot}
+                readEvidence={readEvidence} confirmProposal={confirmProposal} chooseCandidate={chooseCandidate}
+                openProfile={props.openProfile} openRun={props.openRun} openImport={props.openImport}
+                openDraft={props.openDraft} openPage={props.openPage} />)}
+            {!!turn.result.trace?.length && <ol>{turn.result.trace.map((step, index) => <li key={index}>
               {({ resolve_scope: '解析查询对象', read_profile: '读取指标和覆盖人数', read_evidence: '读取原始作答',
-                search_materials: '检索资料', open_import: '选择文件', read_cleaning: '查看清洗进度',
+                search_materials: '检索资料', open_import: '定位数据导入', read_cleaning: '查看清洗进度',
                 propose_recommendation: '准备建议任务', open_page: '定位业务页面', read_exercises: '查找练习',
                 read_jobs: '查询任务', propose_retry: '准备重试', read_material_reviews: '查询待校对资料',
                 read_material_review: '读取待校对段落', propose_publish_material: '准备发布',
@@ -343,7 +310,7 @@ export function LearningChat(props: Props) {
               {' · ' + (({ ok: '已完成', waiting: '等待选择或确认', no_scored_answers: '暂无有效作答',
                 queued: '排队中', running: '进行中', done: '已完成', failed: '任务失败',
                 missing: '未找到对象' } as Record<string, string>)[step.status] || '请求未满足工具条件')}
-            </li>)}</ol>
+            </li>)}</ol>}
           </details>}
           {(turn.result.parts || []).map(({ quote, source }, id) =>
             <blockquote key={id}>
@@ -352,27 +319,49 @@ export function LearningChat(props: Props) {
                 {source.title} · {source.locator}
               </Button>
             </blockquote>)}
-        </div> : <p role="status">正在回答…</p>}
+        </div> : <ActiveStatus label="正在回答" />}
       </article>)}
       <div ref={bottom} />
     </div>
-    <form className="chat-composer" onSubmit={submit}>
+    <div className="chat-composer-dock"><form className="chat-composer" onSubmit={submit}>
       <Input.TextArea aria-label="输入学情问题" placeholder={contextLabel ? `询问 ${contextLabel}，或说“帮我生成建议”` : '问一个问题，或说“看看 DC02 最近一次测验”'}
-        maxLength={1200} autoSize={{ minRows: 2, maxRows: 5 }} value={draft} onChange={event => setDraft(event.target.value)}
+        variant="borderless" maxLength={1200} autoSize={{ minRows: 2, maxRows: 5 }} value={draft} onChange={event => setDraft(event.target.value)}
         onPressEnter={event => {
           if (!event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(draft) }
         }} />
-      <Button type="primary" htmlType="submit" loading={busy} icon={<ArrowUpOutlined />} disabled={!draft.trim()}>发送</Button>
-    </form>
-    {provider && <p className="chat-provider-note">当前问题、近期对话和相关原文片段由 {provider.name} 处理。数据卡中的数值直接读取已确认快照。</p>}
+      <div className="chat-composer-actions">
+      <Space wrap className="chat-context">
+        <Popover trigger="click" open={pickerOpen} onOpenChange={setPickerOpen} content={<div className="context-picker">
+          <Select aria-label="上下文类型" value={pickerKind} onChange={value => setPickerKind(value)}
+            options={[{ value: 'student', label: '学生' }, { value: 'group', label: '班级' }]} />
+          <Select aria-label="选择上下文对象" showSearch={{ optionFilterProp: 'label' }} value={context[pickerKind] || undefined}
+            placeholder={pickerKind === 'student' ? '搜索学生' : '选择班级'} style={{ minWidth: 190 }}
+            options={(pickerKind === 'student' ? students.map(row => ({
+              value: row.学生编号, label: row.学生编号 + ' · ' + row.模拟班级编号 })) :
+              groups.map(group => ({ value: group, label: group + ' · 班级' })))}
+            onChange={value => setTarget(pickerKind, value)} />
+          <Select aria-label="上下文测验" value={context.node || undefined} allowClear placeholder="全部测验" style={{ minWidth: 150 }}
+            onChange={node => setContext({ ...context, node: node || '', snapshot_id: props.snapshot })}
+            options={nodes.map(node => ({ value: node, label: node }))} />
+        </div>}>
+          <Button type="text" aria-label="添加上下文" title="添加上下文" icon={<PlusOutlined />} />
+        </Popover>
+        {context.student && <Tag closable closeIcon={<CloseOutlined />} onClose={() => setContext({ ...context, student: '' })}>学生 {context.student}</Tag>}
+        {context.group && <Tag closable closeIcon={<CloseOutlined />} onClose={() => setContext({ ...context, group: '' })}>班级 {context.group}</Tag>}
+        {context.node && <Tag closable closeIcon={<CloseOutlined />} onClose={() => setContext({ ...context, node: '' })}>测验 {context.node}</Tag>}
+      </Space>
+        <Button type="primary" shape="circle" htmlType="submit" aria-label="发送" title="发送"
+          loading={busy} icon={<ArrowUpOutlined />} disabled={restoring || !draft.trim()} />
+      </div>
+    </form></div>
     <Drawer open={!!source} title="学生原始作答" size="min(850px, 100vw)" onClose={() => setSource(undefined)}>
       {source && <AnswerEvidence answer={source} />}
     </Drawer>
   </section>
 }
 
-function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposal, chooseCandidate, openProfile, openRun, openImport, openDraft, openPage }: {
-  card: CardData; api: Api; snapshot?: string; context: Context
+function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, chooseCandidate, openProfile, openRun, openImport, openDraft, openPage }: {
+  card: CardData; api: Api; snapshot?: string
   readEvidence: (student: string, node: string, indicator: string, snapshot?: string, group?: string, item?: string) => void
   confirmProposal: (card: CardData) => void
   chooseCandidate: (option: Record<string, any>, card: CardData) => void
@@ -380,11 +369,13 @@ function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposa
   openPage: Props['openPage']
   openDraft: Props['openDraft']
 }) {
-  if (card.kind === 'navigation') return <Button onClick={() => openPage(card.page)}>打开{card.title}</Button>
+  if (card.kind === 'navigation') return <Card size="small" className="chat-card" title={card.title}>
+    <Button onClick={() => openPage(card.page)}>打开{card.title}</Button>
+  </Card>
   if (card.kind === 'exercises') return <Card size="small" className="chat-card" title="相关练习">
     <ul>{card.items.map((item: { id: string; text: string }) => <li key={item.id}>{item.id} · {item.text}</li>)}</ul>
   </Card>
-  if (card.kind === 'import') return <Card size="small" className="chat-card" title={card.title || '导入第一批数据'}>
+  if (card.kind === 'import') return <Card size="small" className="chat-card" title="数据导入">
     <Button type="primary" onClick={openImport}>打开数据导入</Button>
   </Card>
   if (card.kind === 'candidates') return <Card size="small" className="chat-card" title="请选择对象">
@@ -445,7 +436,7 @@ function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposa
       </dl>}
       {card.details && <p>{card.details}</p>}
       <Space wrap>
-        {!confirmed && <Button type="primary" onClick={() => confirmProposal(card)}>确认并继续</Button>}
+        {!confirmed && <Button type="primary" onClick={() => confirmProposal(card)}>{card.action === 'generate_recommendation' ? '确认生成' : '确认并继续'}</Button>}
         {confirmed && card.result?.run_id && <ProposalTask id={card.result.run_id} api={api}
           openRun={openRun} openDraft={openDraft} openPage={openPage} />}
         {confirmed && card.result?.snapshot_id && <Tag color="success">快照已启用</Tag>}
@@ -477,9 +468,10 @@ function ProposalTask({ id, api, openRun, openDraft, openPage }: Pick<Props, 'ap
     return () => { active = false; clearTimeout(timer) }
   }, [api, id])
   return <Space wrap>
-    {task && <Tag>{({ queued: '排队中', running: '执行中', done: '已完成', failed: '失败' } as Record<string, string>)[task.state] || task.state}
-      {task.state === 'running' && ' · ' + (({ snapshot: '读取快照', interpret: '学情解读',
-        generate: '生成草稿', final_review: '模型终审' } as Record<string, string>)[task.stage || ''] || '处理任务')}</Tag>}
+    {task?.state === 'running' && <ActiveStatus label={({ snapshot: '读取快照', interpret: '学情解读',
+      generate: '生成草稿', final_review: '模型终审' } as Record<string, string>)[task.stage || ''] || '正在处理任务'} />}
+    {task && task.state !== 'running' && <Tag>{({ queued: '排队中', running: '执行中', done: '已完成', failed: '失败' } as Record<string, string>)[task.state] || task.state}
+</Tag>}
     {task?.error && <Typography.Text type="danger">{task.error}</Typography.Text>}
     <Button onClick={() => task && !['clean', 'generate', 'recommendation_review'].includes(task.kind)
       ? openPage('settings') : openRun(id)}>打开任务</Button>

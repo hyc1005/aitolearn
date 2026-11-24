@@ -1,6 +1,7 @@
 import React from 'react'
 import { Alert, Button, Card, Empty, Space, Steps, Table, Tag, Typography } from 'antd'
 import { CleaningCounts, issueFilters } from './CleaningCounts'
+import { ActiveStatus } from './ActiveStatus'
 
 type Row = Record<string, any>
 
@@ -96,13 +97,13 @@ export default function AgentWorkbench(props: Props) {
     <Card title={runNames[run.kind] + ' · ' + (run.payload.label || run.payload.student || run.payload.group || '')}
       extra={<Space wrap>{props.caseAvailable && <Button onClick={props.openReplay}>Q015 案例回放</Button>}
         <Button onClick={() => props.open('')}>返回运行记录</Button></Space>}>
-      <Steps current={current} items={order.map(stage => ({
+      <Steps className={run.state === 'running' ? 'active-run-steps' : undefined} current={current} items={order.map(stage => ({
         title: clean && stage === 'published' ? '快照生效' : stageNames[stage],
         status: run.stage === stage && run.state === 'failed' ? 'error' :
           stage === 'received' || stages[stage] || run.stage === 'published' ? 'finish' : undefined,
       }))} />
       <Space wrap className="spaced">
-        <Tag>{runStatus(run)}</Tag>
+        {run.state === 'running' ? <ActiveStatus label={runStatus(run)} /> : <Tag>{runStatus(run)}</Tag>}
         {run.state === 'failed' && <Button onClick={props.retry} loading={props.loading}>重试当前阶段</Button>}
         {clean && outdated && !run.correction && <Button onClick={props.rebase} loading={props.loading}>按当前数据重跑</Button>}
         {clean && run.state === 'done' && run.stage === 'confirm' && !outdated &&
