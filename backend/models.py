@@ -6,6 +6,7 @@ import keyring
 from keyring.errors import KeyringError
 
 from .store import db, get
+from .model_transport import ModelRequestError, ModelTransport, response_code
 
 
 PROVIDERS = {
@@ -70,15 +71,17 @@ def complete_with_tools(provider, messages, session, **options):
 def _complete(provider, messages, session, structured, **options):
     key = provider_key(provider)
     if not key:
-        raise ValueError("请先在模型接入中配置 API 密钥")
+        raise ModelRequestError("credentials")
     config = provider_config(provider)
     body = {"model": config["model"], "messages": messages, **options}
     if provider == "deepseek":
         body["thinking"] = {"type": "disabled"}
     try:
-        response = httpx.post(config["base_url"].rstrip("/") + "/chat/completions",
-                              headers={**model_headers(provider, session), "Authorization": f"Bearer {key}"},
-                              json=body, timeout=45)
+        with httpx.Client(transport=ModelTransport(provider, config["model"], session, base_url=config["base_url"]),
+                          timeout=httpx.Timeout(45, connect=8)) as client:
+            response = client.post(config["base_url"].rstrip("/") + "/chat/completions",
+                                   headers={**model_headers(provider, session), "Authorization": f"Bearer {key}"},
+                                   json=body)
         response.raise_for_status()
         message = response.json()["choices"][0]["message"]
         content = message.get("content")
@@ -91,10 +94,8 @@ def _complete(provider, messages, session, structured, **options):
     except httpx.HTTPStatusError as error:
         if structured and error.response.status_code in {400, 422} and "tool" in error.response.text.lower():
             raise ToolsUnavailable("当前模型不支持工具调用") from None
-        messages_by_status = {401: "模型平台未接受当前密钥", 402: "模型平台余额或额度不足",
-                              403: "当前密钥没有该模型的访问权限", 429: "模型平台请求过多，请稍后重试"}
-        raise ValueError(messages_by_status.get(error.response.status_code, "模型平台暂时无法完成请求")) from None
-    except httpx.RequestError:
-        raise ValueError("无法连接模型平台，请检查网络后重试") from None
+        raise ModelRequestError(response_code(error.response)) from None
+    except ModelRequestError:
+        raise
     except (KeyError, IndexError, TypeError, ValueError):
-        raise ValueError("模型平台没有返回可用内容") from None
+        raise ModelRequestError("response") from None

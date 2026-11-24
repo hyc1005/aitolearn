@@ -1,6 +1,8 @@
+import logging
 import time
 
 from .materials import process
+from .model_transport import model_failure, model_job
 from .search import encode
 from .store import all_of, db, get, put
 from .workflow import review_recommendation, run_cleaning, run_recommendation
@@ -20,10 +22,12 @@ def run():
             if pending:
                 job = pending[0]
                 job["state"] = "running"
+                job["model_retrying"] = False
                 put(conn, "job", job["id"], job)
         if not pending:
             time.sleep(0.6)
             continue
+        token = model_job.set(job)
         try:
             if job["kind"] == "extract":
                 with db() as conn:
@@ -59,16 +63,23 @@ def run():
             job["state"] = "done"
         except Exception as exc:
             job["state"] = "failed"
-            if type(exc) in (ValueError, RuntimeError, FileNotFoundError):
+            if failure := model_failure(exc):
+                job["error"] = str(failure)
+                job["model_error"] = failure.code
+            elif type(exc) in (ValueError, RuntimeError, FileNotFoundError):
                 job["error"] = str(exc)[:220]
             else:
                 code = getattr(exc, "status_code", None)
                 job["error"] = {401: "模型密钥无效", 429: "模型调用达到限额"}.get(code, type(exc).__name__)
             job.setdefault("failures", []).append({"stage": job.get("stage"),
                                                    "error": job["error"], "at": time.time()})
+        finally:
+            model_job.reset(token)
+            job["model_retrying"] = False
         with db() as conn:
             put(conn, "job", job["id"], job)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     run()

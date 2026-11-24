@@ -495,6 +495,30 @@ class WorkflowTests(TestCase):
             self.assertEqual(accepted.status_code, 200, accepted.text)
             self.assertEqual(accepted.json()["result"]["snapshot_id"], newer)
 
+    def test_diagnosis_uses_original_run_scope_and_paginates_zero_events(self):
+        batch = self.post_import()
+        self.run_cleaning(batch["run_id"])
+        original = self.confirm(batch).json()["snapshot_id"]
+        with patch("backend.main.api_key", return_value="configured"):
+            response = self.client.post("/api/agent/runs", json={"group": "DC02", "snapshot_id": original})
+        self.assertEqual(response.status_code, 200, response.text)
+        path = "/api/agent/runs/" + response.json()["run_id"] + "/diagnosis"
+        next_batch = self.post_import()
+        self.run_cleaning(next_batch["run_id"])
+        self.confirm(next_batch)
+        diagnosis = self.client.get(path).json()
+        self.assertEqual(diagnosis["snapshot_id"], original)
+        self.assertEqual(diagnosis["group"], "DC02")
+        axis = next(axis for axis in diagnosis["indicators"] if axis["zero_count"])
+        self.assertEqual(axis["distribution"]["count"], axis["coverage"])
+        result = self.client.get(path + "/zero-events", params={"indicator": axis["id"], "limit": 1}).json()
+        self.assertEqual(result["total"], axis["zero_count"])
+        self.assertEqual(sum(group["count"] for group in result["timeline"]), result["total"])
+        row = result["rows"][0]
+        detail = self.client.get(path + "/zero-events", params={"indicator": axis["id"], "event": row["id"]}).json()
+        self.assertEqual((detail["材料编号"], int(detail["得分"])), (row["item"], 0))
+        self.assertEqual(self.client.get(path + "/zero-events", params={"event": "unknown"}).status_code, 404)
+
     def test_onboarding_follows_real_state_and_can_be_reopened(self):
         self.assertEqual(self.client.get("/api/onboarding").json()["state"], "empty")
         batch = self.post_import()

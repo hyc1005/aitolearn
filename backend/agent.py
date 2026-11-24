@@ -1,9 +1,11 @@
 import json
+import httpx
 
 from pydantic import BaseModel, Field
 
 from .data import profile, split
 from .models import active_provider, model_headers, provider_config, provider_key
+from .model_transport import ModelRequestError, ModelTransport, model_failure
 from .search import search
 from .store import db
 
@@ -52,13 +54,16 @@ def configured_model(session):
     config = provider_config(provider)
     key = provider_key(provider)
     if not key:
-        raise ValueError("请先在模型接入中配置 API 密钥")
+        raise ModelRequestError("credentials")
     return OpenAIServerModel(
         model_id=config["model"],
         api_base=config["base_url"],
         api_key=key,
         client_kwargs={"default_headers": model_headers(provider, session),
-                       "timeout": 60, "max_retries": 0},
+                       "timeout": httpx.Timeout(60, connect=8), "max_retries": 0,
+                       "http_client": httpx.Client(transport=ModelTransport(
+                           provider, config["model"], session, stage="agent", base_url=config["base_url"]))},
+        max_tokens=3000,
         **({"extra_body": {"thinking": {"type": "disabled"}}} if provider == "deepseek" else {}),
     )
 
@@ -119,7 +124,8 @@ def generate(tables, payload, session, interpretation=None):
     def get_profile() -> str:
         """Get the current learner or class profile and sample counts."""
         trace.append({"tool": "get_profile"})
-        return json.dumps(snapshot, ensure_ascii=False)
+        return json.dumps({"axes": [{key: axis[key] for key in ("id", "label", "score", "n", "coverage", "status")}
+                                    for axis in snapshot["axes"]], "size": snapshot["size"]}, ensure_ascii=False)
 
     @tool
     def get_attempt_evidence(indicator: str) -> str:
@@ -130,10 +136,13 @@ def generate(tables, payload, session, interpretation=None):
         rows = [(key, row) for key, row in evidence.items() if indicator in row["指标"]]
         rows.sort(key=lambda pair: (pair[0] != anchor, pair[1]["学生编号"], pair[1]["节点编号"],
                                     int(pair[1]["得分"]) / int(pair[1]["满分"])))
-        rows = rows[:12]
+        rows = rows[:4]
         viewed.update(key for key, _ in rows)
         trace.append({"tool": "get_attempt_evidence", "indicator": indicator, "ids": [key for key, _ in rows]})
-        return json.dumps([{"id": key, "attempt": row, "question": questions.get(row["材料编号"])}
+        return json.dumps([{"id": key, "attempt": {field: row.get(field) for field in
+                            ("材料编号", "节点编号", "得分", "满分", "评分点得分", "学生最终作答", "解答过程")},
+                            "question": {field: questions.get(row["材料编号"], {}).get(field) for field in
+                                         ("题干或内容", "评分点")}}
                            for key, row in rows], ensure_ascii=False)
 
     @tool
@@ -143,10 +152,10 @@ def generate(tables, payload, session, interpretation=None):
             query: Teaching question, chapter name or known material number.
         """
         with db() as conn:
-            found = search(conn, query, material_ids=payload.get("material_ids"))
+            found = search(conn, query, limit=4, material_ids=payload.get("material_ids"))
         cited.update({c["id"]: c for c in found})
         trace.append({"tool": "search_materials", "ids": [c["id"] for c in found]})
-        return json.dumps(found, ensure_ascii=False)
+        return json.dumps([{key: block[key] for key in ("id", "text", "locator")} for block in found], ensure_ascii=False)
 
     @tool
     def find_exercises(indicator: str) -> str:
@@ -185,7 +194,12 @@ def generate(tables, payload, session, interpretation=None):
             "、".join(evidence[anchor]["指标"]) + "。observation 必须涵盖该作答，evidence_ids 必须包含该事件。"
         )
     for attempt in range(2):
-        result = str(agent.run(prompt, reset=attempt == 0))
+        try:
+            result = str(agent.run(prompt, reset=True))
+        except Exception as error:
+            if failure := model_failure(error):
+                raise failure from None
+            raise
         try:
             draft = Draft.model_validate_json(result[result.index("{"):result.rindex("}")+1])
             if evidence and not draft.evidence_ids:
@@ -207,5 +221,6 @@ def generate(tables, payload, session, interpretation=None):
                     "questions": {item.question_id: questions[item.question_id] for item in draft.exercises},
                     "model": model.model_id, "trace": trace}
         except ValueError as exc:
-            prompt = "上一次输出校验失败，请修正 JSON：" + str(exc)
+            if attempt == 0:
+                prompt += "\n上一次输出校验失败，请重新查询证据并修正 JSON：" + str(exc)
     raise ValueError("生成结果未通过依据或格式校验")

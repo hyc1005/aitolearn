@@ -42,8 +42,8 @@ async function api<T = any>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch('/api' + path, options)
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(typeof body.detail === 'string' ? body.detail
-      : body.detail ? JSON.stringify(body.detail) : '操作失败，请检查输入或服务状态')
+    throw Object.assign(new Error(typeof body.detail === 'string' ? body.detail
+      : body.detail ? JSON.stringify(body.detail) : '操作失败，请检查输入或服务状态'), { status: response.status })
   }
   return response.json()
 }
@@ -273,7 +273,11 @@ function Workbench() {
         const detail = await api('/agent/runs/' + runId)
         if (active) { setRunDetail(detail); setRunError('') }
       } catch (error) {
-        if (active) setRunError((error as Error).message)
+        if (!active) return
+        if ((error as { status?: number }).status === 404) {
+          window.location.hash = ''
+          setPage('chat')
+        } else setRunError((error as Error).message)
       }
     }
     setRunError('')
@@ -477,7 +481,8 @@ function Workbench() {
           openPage={goTo}
           onTaskStarted={() => { void refresh() }} />
       </div>
-      {page === 'run' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
+      {page === 'run' && <AgentWorkbench key={runId} api={api} openSettings={() => goTo('settings')}
+        jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
         caseAvailable={caseAvailable}
         error={runError} loading={busy} legacy={!!report?.legacy_pending}
         open={openRun} openImport={() => goTo('import')}

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 import keyring
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from keyring.errors import KeyringError
@@ -23,6 +23,7 @@ from .conversation import (CORRECTION_FIELDS, cleaning_card, deterministic, late
                            proposal_card, resolve, resolve_recommendation, save_session, session_view,
                            settings_get, settings_put)
 from .data import REQUIRED, profile, read_file, student_scores
+from .diagnosis import overview as diagnosis_overview, zero_evidence
 from .learning_chat import ChatRequest, ChatTurn, collect_sources, reply
 from .models import KEY_SERVICE, PROVIDERS, ToolsUnavailable, active_provider, complete, provider_config, provider_key
 from .recommendation_review import preview_text
@@ -216,7 +217,8 @@ def chat_task(key: str):
         draft_id = (run.get("stages", {}).get("generate") or {}).get("draft_id")
         draft = get(conn, "draft", draft_id) if draft_id else None
         return {"state": run["state"], "stage": run.get("stage"), "kind": run["kind"],
-                "draft_id": draft_id if draft else None, "error": run.get("error")}
+                "draft_id": draft_id if draft else None, "error": run.get("error"),
+                "model_retrying": run.get("model_retrying", False)}
 
 
 @app.post("/api/chat/proposals/{key}/confirm")
@@ -395,6 +397,31 @@ def run_detail(key: str):
         return run
 
 
+def diagnosis_source(key):
+    with db() as conn:
+        run = require(conn, "job", key)
+        payload = run.get("payload", {})
+        if run["kind"] != "generate" or not payload.get("snapshot_id"):
+            raise HTTPException(404, "这次运行没有诊断快照")
+        return payload, table_data(require(conn, "snapshot", payload["snapshot_id"]))
+
+
+@app.get("/api/agent/runs/{key}/diagnosis")
+def run_diagnosis(key: str):
+    payload, tables = diagnosis_source(key)
+    return diagnosis_overview(tables, payload)
+
+
+@app.get("/api/agent/runs/{key}/diagnosis/zero-events")
+def run_zero_events(key: str, indicator: str = "", node: str = "", item: str = "",
+                    offset: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=50), event: str = ""):
+    payload, tables = diagnosis_source(key)
+    result = zero_evidence(tables, payload, indicator, node, item, offset, limit, event)
+    if result is None:
+        raise HTTPException(404, "该作答不在本次诊断范围内")
+    return result
+
+
 @app.get("/api/agent/cases/q015")
 def q015_case():
     draft_id = "2809aa96e95e4568a990e4f10828b44a"
@@ -473,6 +500,7 @@ def retry_run(conn, item):
         return job(conn, item["kind"], item["payload"])
     item["state"] = "queued"
     item.pop("error", None)
+    item.pop("model_error", None)
     put(conn, "job", item["id"], item)
     return item
 

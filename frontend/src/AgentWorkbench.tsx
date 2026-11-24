@@ -2,6 +2,8 @@ import React from 'react'
 import { Alert, Button, Card, Empty, Space, Steps, Table, Tag, Typography } from 'antd'
 import { CleaningCounts, issueFilters } from './CleaningCounts'
 import { ActiveStatus } from './ActiveStatus'
+import { DiagnosisBoard } from './DiagnosisBoard'
+import type { Api } from './ModelAccess'
 
 type Row = Record<string, any>
 
@@ -52,6 +54,7 @@ export function ReviewPanel({ review, openRef, canOpenRef, collapseDetails }: {
 }
 
 type Props = {
+  api: Api; openSettings: () => void
   jobs: Row[]; detail?: Row; runId: string; loading: boolean; error: string; legacy: boolean
   caseAvailable: boolean
   open: (key: string) => void; migrate: () => void; confirm: () => void; rebase: () => void
@@ -103,7 +106,9 @@ export default function AgentWorkbench(props: Props) {
           stage === 'received' || stages[stage] || run.stage === 'published' ? 'finish' : undefined,
       }))} />
       <Space wrap className="spaced">
-        {run.state === 'running' ? <ActiveStatus label={runStatus(run)} /> : <Tag>{runStatus(run)}</Tag>}
+        {run.state === 'running' ? <ActiveStatus label={runStatus(run) + (run.model_retrying ? ' · 正在重试' : '')} /> : <Tag>{runStatus(run)}</Tag>}
+        {run.state === 'failed' && ['credentials', 'configuration', 'quota'].includes(run.model_error) &&
+          <Button onClick={props.openSettings}>检查模型设置</Button>}
         {run.state === 'failed' && <Button onClick={props.retry} loading={props.loading}>重试当前阶段</Button>}
         {clean && outdated && !run.correction && <Button onClick={props.rebase} loading={props.loading}>按当前数据重跑</Button>}
         {clean && run.state === 'done' && run.stage === 'confirm' && !outdated &&
@@ -130,7 +135,11 @@ export default function AgentWorkbench(props: Props) {
         {stages.python.snapshot_id + '\n' + JSON.stringify(run.manifest, null, 2)}
       </pre></details>
     </Card>}
-    {['clean_review', 'interpret', 'final_review'].map(stage => stages[stage] && <Card title={stageNames[stage]} key={stage}>
+    {run.kind === 'generate' && run.payload.snapshot_id && <Card title="学情解读">
+      <DiagnosisBoard runId={runId} api={props.api} />
+    </Card>}
+    {['clean_review', 'interpret', 'final_review'].map(stage => stages[stage] && <Card
+      title={stage === 'interpret' ? '模型解读与引用样例' : stageNames[stage]} key={stage}>
       <ReviewPanel review={stages[stage]} openRef={setActiveRef}
         collapseDetails={stage === 'clean_review' && stages[stage].decision === 'ready'}
         canOpenRef={ref => stage !== 'final_review' &&

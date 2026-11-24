@@ -83,8 +83,14 @@ export function LearningChat(props: Props) {
         result: { answer: turn.answer, parts: turn.parts || [], cards: turn.cards || [],
           trace: turn.trace, mode: turn.mode, snapshot_id: turn.snapshot_id, session_id: session.id },
       })))
-    }).catch(() => {
-      if (active) setSessionId('')
+    }).catch(error => {
+      if (active) {
+        setSessionId('')
+        if (error.status === 404) {
+          write(SESSION_KEY, '', localStorage)
+          write('aitolearn.import.question', '', sessionStorage)
+        }
+      }
     }).finally(() => { if (active) setRestoring(false) })
     return () => { active = false }
     // The session is restored once per page load.
@@ -277,6 +283,7 @@ export function LearningChat(props: Props) {
           {index === turns.length - 1 && <>
             <Space wrap>
               <Button disabled={busy} onClick={() => void send(turn.question, turn.context, turns.slice(0, index))}>重试</Button>
+              {turn.error.includes('检查模型设置') && <Button onClick={props.openAccess}>打开模型设置</Button>}
             </Space>
           </>}
         </div> : turn.result ? <div>
@@ -451,7 +458,7 @@ function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, choose
 }
 
 function ProposalTask({ id, api, openRun, openDraft, openPage }: Pick<Props, 'api' | 'openRun' | 'openDraft' | 'openPage'> & { id: string }) {
-  const [task, setTask] = useState<{ state: string; stage?: string; kind: string; draft_id?: string; error?: string }>()
+  const [task, setTask] = useState<{ state: string; stage?: string; kind: string; draft_id?: string; error?: string; model_retrying?: boolean }>()
   useEffect(() => {
     let active = true
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -470,6 +477,7 @@ function ProposalTask({ id, api, openRun, openDraft, openPage }: Pick<Props, 'ap
   return <Space wrap>
     {task?.state === 'running' && <ActiveStatus label={({ snapshot: '读取快照', interpret: '学情解读',
       generate: '生成草稿', final_review: '模型终审' } as Record<string, string>)[task.stage || ''] || '正在处理任务'} />}
+    {task?.state === 'running' && task.model_retrying && <Tag>正在重试</Tag>}
     {task && task.state !== 'running' && <Tag>{({ queued: '排队中', running: '执行中', done: '已完成', failed: '失败' } as Record<string, string>)[task.state] || task.state}
 </Tag>}
     {task?.error && <Typography.Text type="danger">{task.error}</Typography.Text>}

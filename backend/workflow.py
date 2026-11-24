@@ -56,21 +56,23 @@ def run_recommendation(job):
     if snapshot is None:
         raise ValueError("任务缺少已确认快照，请重新发起")
     tables = table_data(snapshot)
-    checkpoint(job, "snapshot", {"snapshot_id": snapshot["id"], "material_ids": payload["material_ids"]})
-    checkpoint(job, "interpret")
+    if "snapshot" not in job["stages"]:
+        checkpoint(job, "snapshot", {"snapshot_id": snapshot["id"], "material_ids": payload["material_ids"]})
     if "interpret" not in job["stages"]:
+        checkpoint(job, "interpret")
         checkpoint(job, "interpret", interpret(tables, payload, job["id"]))
-    checkpoint(job, "generate")
     with db() as conn:
         draft = get(conn, "draft", job["id"])
     if draft is None:
+        checkpoint(job, "generate")
         result = generate(tables, payload, job["id"], job["stages"]["interpret"])
         draft = {**result, **payload, "id": job["id"], "run_id": job["id"], "message": result["follow_up"],
                  "approved": False, "revision": 1, "review_state": "pending"}
         with db() as conn:
             put(conn, "draft", draft["id"], draft)
             put(conn, "draft_revision", f'{draft["id"]}:1', draft)
-    checkpoint(job, "generate", {"model": draft["model"], "trace": draft["trace"], "draft_id": draft["id"]})
+    if "generate" not in job["stages"]:
+        checkpoint(job, "generate", {"model": draft["model"], "trace": draft["trace"], "draft_id": draft["id"]})
     review_recommendation(job, draft["id"], 1)
 
 
