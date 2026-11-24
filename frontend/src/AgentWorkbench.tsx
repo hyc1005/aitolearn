@@ -152,7 +152,14 @@ export default function AgentWorkbench(props: Props) {
     {run.stage_timings?.[shown]?.model_requests > 0 && <small>本阶段模型请求 {run.stage_timings[shown].model_requests} 次
       {run.stage_timings[shown].retries ? ' · 传输重试 ' + run.stage_timings[shown].retries + ' 次' : ''}</small>}
     {shown === 'snapshot' && <Card title="核对范围"><p>{run.payload.student || run.payload.group} · {run.payload.node || '全部测验'}</p>
-      <p>快照：{run.payload.snapshot_id}</p><p>固定资料版本：{run.payload.material_ids?.length || 0} 份</p></Card>}
+      <p className="preserve">快照：{run.payload.snapshot_id}</p>
+      <p><strong>本次可引用的已发布资料：{run.payload.material_ids?.length || 0} 份</strong></p>
+      {!run.payload.material_ids?.length && <p>没有可引用资料时直接生成学情观察稿，无需反复检索教材。</p>}
+      {!!run.snapshot_uploads?.length && <p><strong>学情快照实际导入文件：</strong>{run.snapshot_uploads.join('、')}</p>}
+      <details><summary>原表来源（仅索引）</summary>
+        <p>表格中的资料文件名、课标页码和教材页码用于溯源，不代表已上传或可以引用正文。</p>
+        {!!run.source_index_examples?.length && <ul>{run.source_index_examples.map((name: string) => <li className="preserve" key={name}>{name}</li>)}</ul>}
+      </details></Card>}
     {shown === 'received' && <Card title="附件已接收"><p>{run.payload.label}</p><p>将在数据清洗与模型检查后等待确认。</p></Card>}
     {shown === 'published' && run.result?.recommendation_run_id && <Card title="后续建议"><Button onClick={() => props.open(run.result.recommendation_run_id)}>查看自动续跑的建议任务</Button></Card>}
     {shown === 'published' && run.result?.continuation_error && <Alert type="warning" title={'未自动生成建议：' + run.result.continuation_error} />}
@@ -190,9 +197,12 @@ export default function AgentWorkbench(props: Props) {
       {stage === 'interpret' && selectedEvidence && <AnswerEvidence key={activeRef} answer={selectedEvidence as Parameters<typeof AnswerEvidence>[0]['answer']} />}
       {stages[stage].trace && <details><summary>查看工具输出</summary><pre className="preserve">{JSON.stringify(stages[stage].trace, null, 2)}</pre></details>}
     </Card>)}
-    {shown === 'generate' && stages.generate && <Card title="生成草稿" extra={<Tag>{stages.generate.model}</Tag>}>
+    {shown === 'generate' && stages.generate && <Card title={stages.generate.draft_mode === 'observation' ? '学情观察稿' : '生成草稿'} extra={<Tag>{stages.generate.model}</Tag>}>
+      {stages.generate.draft_mode === 'observation' && <Alert className="spaced" type="info"
+        title={stages.generate.material_gap === 'no_published_material' ? '未绑定已发布教材，已依据学情生成观察稿' : '没有匹配的教材段落，已依据学情生成观察稿'}
+        description={stages.generate.variant_omission_reason || '本稿不含教材讲解或练习。'} />}
       {draftId && <Button onClick={() => props.openDraft(draftId)}>查看建议正文与引用</Button>}
-      <details><summary>查看工具调用</summary><pre className="preserve">{JSON.stringify(stages.generate.trace, null, 2)}</pre></details>
+      <details><summary>查看取证记录</summary><pre className="preserve">{JSON.stringify(stages.generate.trace, null, 2)}</pre></details>
     </Card>}
     {!!run.failures?.length && <details className="task-diagnostics"><summary>诊断记录 · {run.failures.length} 次失败</summary>{run.failures.map((entry: Row, index: number) =>
       <div key={index} className="spaced">

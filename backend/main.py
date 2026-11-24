@@ -467,8 +467,15 @@ def run_detail(key: str):
             run.update(report=snapshot["report"], manifest=snapshot["manifest"],
                        outdated=(active["id"] if active else None) != snapshot["base_snapshot_id"],
                        correction=require(conn, "import", run["payload"]["batch_id"]).get("correction", False))
-        if "interpret" in stages:
-            data = table_data(require(conn, "snapshot", run["payload"]["snapshot_id"]))
+        if run["kind"] == "generate" and run["payload"].get("snapshot_id"):
+            snapshot = require(conn, "snapshot", run["payload"]["snapshot_id"])
+            data = table_data(snapshot)
+            run["snapshot_uploads"] = list(dict.fromkeys(source["name"] for batch in snapshot.get("manifest", [])
+                                                          for source in batch.get("sources", [])))
+            run["source_index_examples"] = list(dict.fromkeys(
+                row["来源或资料文件"] for row in data["题目与材料"].values()
+                if row.get("来源或资料文件") and Path(row["来源或资料文件"]).suffix.lower() in MATERIALS))[:5]
+        if run["kind"] == "generate" and "interpret" in stages:
             scope = profile(data, *(run["payload"].get(field, "") for field in ("student", "group", "node")))
             run["interpret_indicators"] = {axis["id"]: {key: axis[key] for key in ("label", "coverage", "population", "n")}
                                            for axis in scope["axes"]}

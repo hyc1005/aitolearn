@@ -160,6 +160,8 @@ def final_review(draft, session):
         "全部检查通过时 decision 为 pass，findings 返回空数组。"
         "发现材料缺失时，只有草稿也明确说明不足且未给出无依据讲解和练习才允许通过。"
     )
+    if draft.get("draft_mode") == "observation":
+        instruction += " 这是仅含学情观察的草稿。没有讲解、教材引用、练习或变式是预期行为；若确实未提供这些内容，source 与 exercise 视为通过；仍必须审查作答依据和学生可见文字。"
     try:
         if len(json.dumps(facts, ensure_ascii=False).encode()) > request_budget() - 4096:
             raise ModelRequestError("context")
@@ -173,13 +175,19 @@ def final_review(draft, session):
 
 
 def review_checks(facts, instruction, session):
+    budget = 6000
+    instruction += " summary 简洁，findings 仅列主要问题。"
     for attempt in range(2):
         try:
-            review, model = structured_review(FinalReview, instruction, facts, f"{session}-{attempt}")
+            review, model = structured_review(FinalReview, instruction, facts, f"{session}-{attempt}", max_tokens=budget)
         except ModelRequestError as error:
-            if attempt or error.code not in {"json", "schema"}:
+            if attempt or error.code not in {"json", "schema", "truncated", "output_budget"}:
                 raise
-            instruction += f" 上次输出需要修正：{error}。"
+            if error.code in {"truncated", "output_budget"}:
+                budget = 10000 if error.code == "truncated" else 3000
+                instruction += " 仍核对所有项目。summary 不超过 100 字，只列必须修正的事项。"
+            else:
+                instruction += f" 上次输出需要修正：{error}。"
             continue
         expected = "revise" if "revise" in review.checks.values() else "pass"
         if (review.checks.keys() == facts["checks"].keys() and review.decision == expected

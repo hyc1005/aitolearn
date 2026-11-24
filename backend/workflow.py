@@ -84,7 +84,9 @@ def run_recommendation(job):
             put(conn, "draft", draft["id"], draft)
             put(conn, "draft_revision", f'{draft["id"]}:1', draft)
     if "generate" not in job["stages"]:
-        checkpoint(job, "generate", {"model": draft["model"], "trace": draft["trace"], "draft_id": draft["id"]})
+        checkpoint(job, "generate", {"model": draft["model"], "trace": draft["trace"], "draft_id": draft["id"],
+                                     "draft_mode": draft.get("draft_mode"), "material_gap": draft.get("material_gap"),
+                                     "variant_omission_reason": draft.get("variant_omission_reason")})
     review_recommendation(job, draft["id"], 1)
 
 

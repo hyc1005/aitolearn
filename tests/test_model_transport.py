@@ -99,7 +99,7 @@ class ModelTransportTests(unittest.TestCase):
                  "citations": {"ref": {"text": "source"}}, "student_text": "", "variant": None,
                  "exercises": [{"question_id": "Q1", "evidence_ids": ["attempt"]}], "questions": {"Q1": {}}}
 
-        def review(_, __, group, ___):
+        def review(_, __, group, ___, **options):
             key, = group["checks"]
             if key == "source":
                 self.assertEqual(group["citations"]["ref"]["text"], "source")

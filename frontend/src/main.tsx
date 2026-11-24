@@ -577,10 +577,10 @@ function Workbench() {
                 const matches = await api('/materials/search' + query({query:q.材料编号}))
                 const source = matches.find((m: Row) => m.locator === q.材料编号)
                 if (source) setCitation(source)
-                else message.info(q.题干或内容 || q.来源或资料文件 || '请先发布题库')
+                else message.info(q.题干或内容 || (q.来源或资料文件 ? '原表来源（仅索引）：' + q.来源或资料文件 : '请先发布题库'))
               })}>{q.材料编号}</Button>)}
           </Space> }}
-          columns={['主题', '观察指标', '课标整理编号', '课标文件页／正文页', '教材正文页'].map(k => ({ title: k, dataIndex: k }))} /></Card>
+          columns={['主题', '观察指标', '课标整理编号', '课标文件页／正文页', '教材正文页'].map(k => ({ title: k === '教材正文页' ? '教材页码（原表索引）' : k, dataIndex: k }))} /></Card>
         <Card title="上传的教学资料">
           <MaterialUpload api={api} refresh={refresh} />
           {!materials.some(d => d.source !== 'imported_question_bank') && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未上传教材文件" />}
@@ -746,7 +746,7 @@ function Workbench() {
         })}>保存绑定</Button>
       </Space>
     </Drawer>
-    <Drawer open={!!draft} title={'教学安排 · ' + (draft?.student || draft?.group || '')} size="min(860px, 100vw)" onClose={() => setDraft(undefined)}
+    <Drawer open={!!draft} title={(draft?.draft_mode === 'observation' ? '学情观察稿 · ' : '教学安排 · ') + (draft?.student || draft?.group || '')} size="min(860px, 100vw)" onClose={() => setDraft(undefined)}
       footer={draft && <Space wrap className="draft-controls">
         {changed ? <Button type="primary" loading={busy} onClick={() => saveDraft(false)}>保存修订并重新终审</Button>
           : draft.approved ? <Button type="primary" loading={busy} onClick={() => perform(async () => setPreview(await api('/recommendations/' + draft.id + '/preview')))}>查看学生练习单</Button>
@@ -756,7 +756,10 @@ function Workbench() {
         }}>查看运行</Button>}
         {!changed && !draft.approved && currentReview?.decision !== 'pass' && <Text type="secondary">当前修订需通过终审</Text>}
       </Space>}>
-      {draft && <><Title level={5}>学情与依据</Title>
+      {draft && <>
+        {draft.draft_mode === 'observation' && <Alert className="spaced" type="info" title="仅依据本次学情与作答记录，不含教材讲解或练习" />}
+        {draft.variant_omission_reason && <Alert className="spaced" type="info" title={draft.variant_omission_reason} />}
+        <Title level={5}>学情与依据</Title>
         <Paragraph editable={draft.snapshot_id ? { onChange: observation => { setDraft({ ...draft, observation, approved: false }); setPreview(undefined) } } : false}>{draft.observation}</Paragraph>
         <Paragraph editable={draft.snapshot_id ? { onChange: uncertainty => { setDraft({ ...draft, uncertainty, approved: false }); setPreview(undefined) } } : false}>{draft.uncertainty}</Paragraph>
         {draft.evidence.map((r: Row) => <Paragraph key={r.id}>{r.材料编号} · {r.得分}/{r.满分} · {r.阶段 || r.节点编号} · {r.评分点得分}<br /><span className="preserve">{r.解答过程}</span></Paragraph>)}
@@ -771,7 +774,7 @@ function Workbench() {
               <Button key={c.id} type="link" onClick={() => setCitation(c)}>{c.title} · {c.locator}</Button>)}
           </Card>)}</> : draft.citations.map((c: Row) =>
           <Button key={c.id} type="link" onClick={() => setCitation(c)}>{c.title} · {c.locator}</Button>)}
-        <Title level={5}>练习顺序</Title>
+        {(draft.draft_mode !== 'observation' || !!draft.exercises.length) && <Title level={5}>练习顺序</Title>}
         {draft.exercises.map((q: Row, index: number) => <Card size="small" className="spaced" key={q.question_id} title={(index + 1) + ' · ' + q.question_id} extra={<Space>
           {[-1, 1].map(delta => <Button key={delta} size="small" disabled={index + delta < 0 || index + delta >= draft.exercises.length} onClick={() => {
             const items = [...draft.exercises]; const item = items.splice(index, 1)[0]; items.splice(index + delta, 0, item); setDraft({ ...draft, exercises: items, approved: false }); setPreview(undefined)
