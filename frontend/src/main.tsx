@@ -361,7 +361,9 @@ function Workbench() {
     files.forEach(f => payload.append('files', f))
     payload.append('mapping', mapping)
     const result = await api('/imports', { ...post, body: payload })
-    openRun(result.run_id)
+    if (result.skipped?.length) message.info('已跳过字段说明：' + result.skipped.join('、'))
+    setFiles([])
+    await refresh()
   })
   const openDoc = (id: string) => perform(async () => { setDoc(await api('/materials/' + id)); setChanges({}) })
   const launch = (target: Row, onLaunched?: () => void) => perform(async () => {
@@ -491,18 +493,20 @@ function Workbench() {
               : latestClean && ['queued', 'running'].includes(latestClean.state) ? <Alert type="info" title="本批数据正在清洗"
                 description="可以查看真实计数、异常和复核状态。" action={<Button onClick={() => openRun(latestClean.id)}>查看本批进度</Button>} />
               : report?.snapshot_id ? <Space wrap><Tag color="success">已确认快照</Tag>
-                <Button type="primary" onClick={() => goTo('overview')}>下一步 · 查看班级诊断</Button>
+                <Button type="primary" onClick={() => goTo('chat')}>回到对话，问第一个问题</Button>
                 <Button onClick={() => goTo('materials')}>前往课程与资料</Button></Space>
-              : <Space wrap><Button type="primary" onClick={() => importInput.current?.click()}>选择本批文件</Button>
-                <Text type="secondary">支持 XLSX 工作簿，或名册、课程、测验、题目、作答五张 CSV。</Text></Space>}
+              : <Text type="secondary">选择 XLSX 工作簿，或一次选中配套 CSV 文件。</Text>}
           </div>
         </Card>
         <Card title="导入学情文件">
           <input ref={importInput} type="file" hidden multiple accept=".csv,.xlsx" onChange={e => setFiles(Array.from(e.target.files || []))} />
           <Space wrap><Button onClick={() => importInput.current?.click()}>选择文件</Button>
-            <Text>{files.length ? files.map(file => file.name).join('、') : '尚未选择文件'}</Text>
-            <Button type="primary" loading={busy} disabled={!files.length} onClick={importFiles}>运行 Agent 清洗</Button>
+            <Text>{files.length ? '已选 ' + files.length + ' 个文件' : '尚未选择文件'}</Text>
+            <Button type="primary" loading={busy} disabled={!files.length} onClick={importFiles}>开始清洗</Button>
           </Space>
+          {!!files.length && <ul>{files.map((file, index) => <li key={file.name + index}>
+            {file.name} <Button type="link" onClick={() => setFiles(current => current.filter((_, i) => i !== index))}>移除</Button>
+          </li>)}</ul>}
           <details className="spaced"><summary>自定义列映射</summary><Input.TextArea value={mapping} onChange={e => setMapping(e.target.value)} placeholder='{"学号":"学生编号"}' /></details>
           <Paragraph type="secondary" className="spaced">可上传 XLSX 工作簿或成组 CSV，也支持名册和总分。缺少文件时，清洗报告会列出无法关联的原始行。</Paragraph>
         </Card>

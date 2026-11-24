@@ -61,6 +61,18 @@ class WorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
+    def test_import_bundle_skips_field_dictionary_without_partial_upload(self):
+        paths = list(next(Path("ori_data").rglob("字段说明.csv")).parent.glob("*.csv"))
+        files = [("files", (path.name, path.read_bytes(), "text/csv")) for path in paths]
+        response = self.client.post("/api/imports", files=files)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["skipped"], ["字段说明.csv"])
+        with store.db() as conn:
+            batch = store.get(conn, "import", response.json()["batch_id"])
+            counts = {name: sum(row["table"] == name for row in batch["rows"])
+                      for name in ("模拟学生", "课程要求", "测验节点", "题目与材料", "作答记录")}
+        self.assertEqual(counts, {"模拟学生": 40, "课程要求": 9, "测验节点": 2, "题目与材料": 65, "作答记录": 806})
+
     def run_cleaning(self, key, check_model=True):
         with store.db() as conn:
             item = store.get(conn, "job", key)

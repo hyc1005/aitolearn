@@ -160,7 +160,7 @@ class ChatTools:
         return {"status": "ok", "count": len(sources), "sources": sources}
 
     def open_import(self):
-        return self.pause({"kind": "import"}, "请选择本批文件。")
+        return self.pause({"kind": "import", "navigate": True}, "请前往数据导入选择本批文件。")
 
     def read_exercises(self, indicator):
         if indicator not in self.data["课程要求"]:

@@ -480,7 +480,7 @@ def retry_run(conn, item):
 @app.post("/api/imports")
 async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}"),
                 chat_session_id: str | None = Form(None)):
-    rows, sources = [], []
+    rows, sources, pending, skipped = [], [], [], []
     try:
         columns = json.loads(mapping)
         if not isinstance(columns, dict) or not all(isinstance(v, str) for v in columns.values()):
@@ -488,9 +488,24 @@ async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}"),
         for file in files:
             name = Path(file.filename or "").name
             raw = await read_upload(file)
-            parsed = read_file(name, raw, columns)
+            if name.lower().endswith(".csv"):
+                try:
+                    headers = next(csv.reader(io.StringIO(raw.decode("utf-8-sig"))), [])
+                except UnicodeDecodeError:
+                    headers = next(csv.reader(io.StringIO(raw.decode("gb18030"))), [])
+                if {"数据表", "字段名", "含义"} <= {header.strip() for header in headers}:
+                    skipped.append(name)
+                    continue
+            try:
+                parsed = read_file(name, raw, columns)
+            except (ValueError, UnicodeError, csv.Error) as error:
+                raise ValueError(f"{name}：{error}") from error
             file_id = new_id()
             rows.extend({**row, "file_id": file_id} for row in parsed)
+            pending.append((file_id, name, raw))
+        if not rows:
+            raise ValueError("没有可导入的业务数据，请选择学生、课程、测验、题目和作答文件。")
+        for file_id, name, raw in pending:
             sources.append({"id": file_id, "name": name, "hash": hashlib.sha256(raw).hexdigest(),
                             "path": save_file(raw, Path(name).suffix.lower())})
     except (ValueError, OSError, csv.Error) as exc:
@@ -501,6 +516,7 @@ async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}"),
                  "label": "、".join(source["name"] for source in sources), "confirmed": False}
         run = queue_cleaning(conn, batch)
         result = cleaning_run(run)
+        result["skipped"] = skipped
         if chat_session_id is not None:
             existing = get(conn, "chat_session", chat_session_id) or {}
             context = existing.get("context", {})

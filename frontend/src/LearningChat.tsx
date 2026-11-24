@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Alert, Button, Card, Drawer, Empty, Input, Popover, Select, Space, Tag, Typography } from 'antd'
-import { ArrowUpOutlined, CloseOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons'
+import { ArrowUpOutlined, CloseOutlined, PlusOutlined } from '@ant-design/icons'
 import { AnswerEvidence, type Answer } from './AnswerEvidence'
 import type { Api, ModelAccess } from './ModelAccess'
 
@@ -54,17 +54,6 @@ function write(key: string, value: string, storage: Storage) {
   try { value ? storage.setItem(key, value) : storage.removeItem(key) } catch { /* local preference only */ }
 }
 
-function onboardingText(state: string) {
-  return ({
-    empty: ['第一次使用', '导入第一批数据，清洗结果会直接出现在这里。'],
-    cleaning: ['本批数据正在清洗', '可以查看计数、异常和复核状态。'],
-    review: ['清洗完成，待确认', '核对有效作答与异常摘要后建立快照。'],
-    failed: ['本批清洗失败', '保留原问题与文件，可重试或修正后重新导入。'],
-    confirmed: ['已有确认数据', '先看看一个真实班级最需要讲的指标。'],
-    viewed_answer: ['已打开具体作答', '可以基于这次作答生成学习建议。'],
-    review_suggestion: ['建议已生成', '进入草稿完成首次审核。'],
-  } as Record<string, string[]>)[state] || ['第一次使用', '从导入第一批数据开始。']
-}
 
 export function LearningChat(props: Props) {
   const { api, students, groups, nodes, access } = props
@@ -75,14 +64,9 @@ export function LearningChat(props: Props) {
   const [sessionId, setSessionId] = useState(() => read(SESSION_KEY, localStorage))
   const [source, setSource] = useState<Answer>()
   const [onboarding, setOnboarding] = useState<Onboarding>()
-  const [onboardingBusy, setOnboardingBusy] = useState(false)
-  const [later, setLater] = useState(() => read(LATER_KEY, sessionStorage) === '1')
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerKind, setPickerKind] = useState<'student' | 'group'>('student')
   const bottom = useRef<HTMLDivElement>(null)
-  const fileInput = useRef<HTMLInputElement>(null)
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
-  const onboardInput = useRef<HTMLInputElement>(null)
   const onboardingRequest = useRef(0)
   const provider = access?.providers.find(item => item.id === access.active)
   const contextLabel = context.student || context.group || ''
@@ -97,7 +81,6 @@ export function LearningChat(props: Props) {
 
   useEffect(() => {
     if (!props.onboardingSignal) return
-    setLater(false)
     write(LATER_KEY, '', sessionStorage)
     void loadOnboarding()
     // Settings can reopen the card after it was acknowledged.
@@ -201,6 +184,9 @@ export function LearningChat(props: Props) {
       if (result.session_id) { setSessionId(result.session_id); write(SESSION_KEY, result.session_id, localStorage) }
       if (result.context) setContext({ ...result.context, anchor_event: '' })
       setTurns([...history, { question, context: outgoing, result }])
+      if (!props.snapshot && result.cards?.some(card => card.kind === 'import') && !result.cards.some(card => card.navigate))
+        write('aitolearn.import.question', question, sessionStorage)
+      if (result.cards?.some(card => card.kind === 'import' && card.navigate)) props.openImport()
       void loadOnboarding()
     } catch (error) {
       setTurns([...history, { question, context: outgoing, error: (error as Error).message }])
@@ -220,15 +206,6 @@ export function LearningChat(props: Props) {
     setDraft('')
   }
 
-  function focusCard(text: string) {
-    const card = [...document.querySelectorAll('.chat-card')].find(element => element.textContent?.includes(text))
-    card?.scrollIntoView({ block: 'center' })
-  }
-
-  function openCleaningGuide() {
-    if (turns.some(turn => turn.result?.cards?.some(card => card.kind === 'cleaning'))) focusCard('本批清洗')
-    else void send('查看清洗进度')
-  }
 
   function setTarget(kind: 'student' | 'group', value: string) {
     setContext({ student: kind === 'student' ? value : '', group: kind === 'group' ? value : '',
@@ -245,27 +222,6 @@ export function LearningChat(props: Props) {
     } catch (error) { window.alert((error as Error).message) }
   }
 
-  async function upload(files: File[]) {
-    if (!files.length) return
-    setBusy(true)
-    const body = new FormData()
-    Array.from(files).forEach(file => body.append('files', file))
-    body.append('mapping', '{}')
-    body.append('chat_session_id', sessionId || 'new')
-    try {
-      const started = await api<{ session_id: string; card: CardData }>('/imports', { method: 'POST', body })
-      setSessionId(started.session_id)
-      write(SESSION_KEY, started.session_id, localStorage)
-      setSelectedFiles([])
-      setTurns(current => [...current, { question: '导入 ' + Array.from(files).map(file => file.name).join('、'),
-        context, result: { answer: '文件已接收，正在启动本批清洗。', parts: [], cards: [started.card] } }])
-      props.onTaskStarted()
-      void loadOnboarding()
-    } catch (error) {
-      setTurns(current => [...current, { question: '导入文件', context,
-        error: (error as Error).message }])
-    } finally { setBusy(false) }
-  }
 
   async function confirmProposal(card: CardData) {
     try {
@@ -310,9 +266,11 @@ export function LearningChat(props: Props) {
     void send(question, { ...override, snapshot_id: card.snapshot_id || context.snapshot_id })
   }
 
-  const onboardingState = onboarding?.state || 'empty'
-  const [onboardTitle, onboardBody] = onboardingText(onboardingState)
-  const hideOnboarding = onboarding?.completed || onboarding?.dismissed || later
+  useEffect(() => {
+    if (!props.snapshot) return
+    const question = read('aitolearn.import.question', sessionStorage)
+    if (question) { setDraft(question); write('aitolearn.import.question', '', sessionStorage) }
+  }, [props.snapshot])
 
   return <section className="learning-chat">
     <div className="chat-toolbar">
@@ -339,53 +297,14 @@ export function LearningChat(props: Props) {
       </Space>
       <Space wrap>
         <Button type="text" onClick={props.openAccess}>{provider ? provider.model + (provider.configured ? '' : ' · 待配置') : '模型接入'}</Button>
-        <Button icon={<UploadOutlined />} onClick={() => fileInput.current?.click()} disabled={busy}>导入文件</Button>
         <Button disabled={busy || !turns.length} onClick={newChat}>新对话</Button>
       </Space>
     </div>
-    <input ref={fileInput} type="file" hidden multiple accept=".csv,.xlsx" onChange={event => {
-      setSelectedFiles(Array.from(event.target.files || [])); event.target.value = ''
-    }} />
-    {!hideOnboarding && onboarding && <Card className="onboarding-card" title={onboardTitle}
-      extra={<Space><Button type="text" onClick={() => { setLater(true); write(LATER_KEY, '1', sessionStorage) }}>稍后</Button>
-        <Button type="text" onClick={() => void api('/onboarding/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ permanent: true }) }).then(() => setOnboarding(prev => prev ? { ...prev, completed: true } : prev))}>已了解</Button></Space>}>
-      <p>{onboardBody}</p>
-      <Space wrap>
-        {onboardingState === 'empty' && <>
-          <input ref={onboardInput} type="file" hidden multiple accept=".csv,.xlsx" onChange={event => {
-            setSelectedFiles(Array.from(event.target.files || [])); event.target.value = ''
-          }} />
-          <Button type="primary" loading={onboardingBusy} onClick={() => onboardInput.current?.click()}>导入第一批数据</Button>
-          <Button onClick={props.openImport}>查看支持的文件</Button>
-          <Typography.Text type="secondary">支持 XLSX 工作簿，或名册、课程、测验、题目、作答五张 CSV。</Typography.Text>
-        </>}
-        {onboardingState === 'cleaning' && <Button type="primary" onClick={openCleaningGuide}>查看本批进度</Button>}
-        {onboardingState === 'review' && <Button type="primary" onClick={() => {
-          if (turns.some(turn => turn.result?.cards?.some(card => card.kind === 'proposal' && card.action === 'confirm_import'))) focusCard('确认并继续')
-          else void send('核对并确认这批数据')
-        }}>核对并确认数据</Button>}
-        {onboardingState === 'failed' && <><Button type="primary" onClick={() => void send('查看清洗进度')}>查看失败原因</Button>
-          <Button onClick={props.openImport}>重新选择文件</Button></>}
-        {onboardingState === 'confirmed' && <Button type="primary" onClick={() => {
-          const group = onboarding.detail.groups?.[0]
-          void send(group ? `看看 ${group} 最近一次测验哪里最薄弱` : '看看最近一次测验哪里最薄弱', group ? { group, student: '' } : undefined)
-        }}>看看这个班哪里最需要讲</Button>}
-        {onboardingState === 'viewed_answer' && <Button type="primary" onClick={() => {
-          const detail = onboarding.detail
-          void send(`基于 ${detail.student} 的 ${detail.node || ''} ${detail.indicator} 作答生成学习建议`,
-            { student: detail.student, group: '', node: detail.node || '', anchor_event: detail.event })
-        }}>基于这次作答生成建议</Button>}
-        {onboardingState === 'review_suggestion' && <Button type="primary" onClick={() => props.openDraft(onboarding.detail.draft.id)}>审核学习建议</Button>}
-        {onboardingState !== 'empty' && !onboarding.model_configured && <Button onClick={props.openAccess}>前往设置</Button>}
-      </Space>
-    </Card>}
+    {!props.snapshot && <Button type="link" onClick={props.openImport}>去导入数据</Button>}
     {!turns.length && <div className="chat-empty">
       <h2>今天想聊什么？</h2>
       <p>{props.snapshot ? '直接提问。系统会从已确认数据解析学生、班级和测验；也可以先添加上下文。' : '可以直接提问，也可以先导入第一批学情数据。'}</p>
-      <Space wrap>
-        {['看看 DC02 最近一次测验', '这个班哪里最需要讲', '帮我生成学习建议'].map(prompt =>
-          <Button key={prompt} disabled={busy} onClick={() => void send(prompt)}>{prompt}</Button>)}
-      </Space>
+      {props.snapshot && <Button onClick={() => setDraft('我们班最近一次测验，哪个指标最值得先讲？')}>试试询问班级学情</Button>}
       {provider && !provider.configured && <p><Button onClick={props.openAccess}>配置模型</Button></p>}
     </div>}
     <div className="chat-thread" aria-label="学情对话记录">
@@ -398,7 +317,6 @@ export function LearningChat(props: Props) {
           {index === turns.length - 1 && <>
             <Space wrap>
               <Button disabled={busy} onClick={() => void send(turn.question, turn.context, turns.slice(0, index))}>重试</Button>
-              <Button onClick={props.openAccess}>检查模型设置</Button>
               <Button onClick={props.openImport}>重新导入</Button>
             </Space>
           </>}
@@ -408,8 +326,7 @@ export function LearningChat(props: Props) {
             api={api} snapshot={turn.result?.snapshot_id || props.snapshot} context={turn.context || context}
             readEvidence={readEvidence} confirmProposal={confirmProposal} chooseCandidate={chooseCandidate}
             openProfile={props.openProfile} openRun={props.openRun} openImport={props.openImport}
-            openDraft={props.openDraft} openPage={props.openPage}
-            fileInput={fileInput} />)}
+            openDraft={props.openDraft} openPage={props.openPage} />)}
           {turn.result.mode === 'without_tools' && <Typography.Text type="secondary">当前模型提供普通对话，可用下方操作按钮继续。</Typography.Text>}
           {!!turn.result.trace?.length && <details className="spaced"><summary>查看执行过程</summary>
             <ol>{turn.result.trace.map((step, index) => <li key={index}>
@@ -439,13 +356,6 @@ export function LearningChat(props: Props) {
       </article>)}
       <div ref={bottom} />
     </div>
-    {!!selectedFiles.length && <Card size="small" className="chat-card" title="本批待导入文件">
-      <ul>{selectedFiles.map(file => <li key={file.name + file.lastModified}>{file.name}</li>)}</ul>
-      <Space wrap>
-        <Button type="primary" loading={busy} onClick={() => void upload(selectedFiles)}>开始清洗</Button>
-        <Button disabled={busy} onClick={() => setSelectedFiles([])}>取消</Button>
-      </Space>
-    </Card>}
     <form className="chat-composer" onSubmit={submit}>
       <Input.TextArea aria-label="输入学情问题" placeholder={contextLabel ? `询问 ${contextLabel}，或说“帮我生成建议”` : '问一个问题，或说“看看 DC02 最近一次测验”'}
         maxLength={1200} autoSize={{ minRows: 2, maxRows: 5 }} value={draft} onChange={event => setDraft(event.target.value)}
@@ -461,7 +371,7 @@ export function LearningChat(props: Props) {
   </section>
 }
 
-function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposal, chooseCandidate, openProfile, openRun, openImport, openDraft, openPage, fileInput }: {
+function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposal, chooseCandidate, openProfile, openRun, openImport, openDraft, openPage }: {
   card: CardData; api: Api; snapshot?: string; context: Context
   readEvidence: (student: string, node: string, indicator: string, snapshot?: string, group?: string, item?: string) => void
   confirmProposal: (card: CardData) => void
@@ -469,16 +379,13 @@ function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposa
   openProfile: Props['openProfile']; openRun: Props['openRun']; openImport: Props['openImport']
   openPage: Props['openPage']
   openDraft: Props['openDraft']
-  fileInput: RefObject<HTMLInputElement | null>
 }) {
   if (card.kind === 'navigation') return <Button onClick={() => openPage(card.page)}>打开{card.title}</Button>
   if (card.kind === 'exercises') return <Card size="small" className="chat-card" title="相关练习">
     <ul>{card.items.map((item: { id: string; text: string }) => <li key={item.id}>{item.id} · {item.text}</li>)}</ul>
   </Card>
   if (card.kind === 'import') return <Card size="small" className="chat-card" title={card.title || '导入第一批数据'}>
-    <p>选择 XLSX 工作簿，或成组选择名册、课程、测验、题目、作答 CSV。</p>
-    <Button type="primary" icon={<UploadOutlined />} onClick={() => fileInput.current?.click()}>选择文件</Button>
-    <Button type="link" onClick={openImport}>打开数据导入</Button>
+    <Button type="primary" onClick={openImport}>打开数据导入</Button>
   </Card>
   if (card.kind === 'candidates') return <Card size="small" className="chat-card" title="请选择对象">
     <p>{card.prompt}</p><Space wrap>{(card.options || []).map((option: Record<string, any>) =>
