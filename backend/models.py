@@ -40,7 +40,7 @@ def provider_key(provider):
         return key
     try:
         key = keyring.get_password(KEY_SERVICE, provider)
-    except KeyringError:
+    except (KeyringError, OSError):
         key = None
     if key:
         return key
@@ -55,7 +55,19 @@ def model_headers(provider, session):
     return headers
 
 
+class ToolsUnavailable(ValueError):
+    pass
+
+
 def complete(provider, messages, session, **options):
+    return _complete(provider, messages, session, False, **options)
+
+
+def complete_with_tools(provider, messages, session, **options):
+    return _complete(provider, messages, session, True, **options)
+
+
+def _complete(provider, messages, session, structured, **options):
     key = provider_key(provider)
     if not key:
         raise ValueError("请先在模型接入中配置 API 密钥")
@@ -68,11 +80,17 @@ def complete(provider, messages, session, **options):
                               headers={**model_headers(provider, session), "Authorization": f"Bearer {key}"},
                               json=body, timeout=45)
         response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
+        message = response.json()["choices"][0]["message"]
+        content = message.get("content")
+        if structured and (message.get("tool_calls") or isinstance(content, str) and content.strip()):
+            return {"role": "assistant", "content": content, **(
+                {"tool_calls": message["tool_calls"]} if message.get("tool_calls") else {})}
         if not isinstance(content, str) or not content.strip():
             raise ValueError
         return content
     except httpx.HTTPStatusError as error:
+        if structured and error.response.status_code in {400, 422} and "tool" in error.response.text.lower():
+            raise ToolsUnavailable("当前模型不支持工具调用") from None
         messages_by_status = {401: "模型平台未接受当前密钥", 402: "模型平台余额或额度不足",
                               403: "当前密钥没有该模型的访问权限", 429: "模型平台请求过多，请稍后重试"}
         raise ValueError(messages_by_status.get(error.response.status_code, "模型平台暂时无法完成请求")) from None

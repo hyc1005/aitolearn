@@ -4,6 +4,8 @@ The language model may propose an operation, but only the small set below is
 accepted.  Every object, batch and snapshot is resolved again against the
 confirmed data before a proposal is stored or confirmed.
 """
+import hashlib
+import json
 import re
 import time
 
@@ -12,7 +14,9 @@ from .models import active_provider, provider_key
 from .snapshots import current_snapshot, table_data
 from .store import all_of, get, new_id, put
 
-SUPPORTED = {"generate_recommendation", "confirm_import"}
+SUPPORTED = {"generate_recommendation", "confirm_import", "publish_material", "retry_job",
+             "correct_attempt", "revise_draft", "revise_material"}
+CORRECTION_FIELDS = {"学生编号", "材料编号", "主题编号", "节点编号", "评分状态", "得分", "满分", "评分点得分"}
 MAX_TURNS = 60
 STUDENT_ID = re.compile(r"(?<![A-Z0-9])([A-Z]{1,4}\d{2,4})(?![A-Z0-9])")
 NODE_ID = re.compile(r"(?<![A-Z0-9])(N\d{1,4})(?![A-Z0-9])")
@@ -73,14 +77,13 @@ def resolve(data, question, context=None):
 
 def profile_card(data, snapshot_id, student="", group="", node="", item=""):
     snapshot = profile(data, student=student, group=group, node=node, include_question_scope=True)
-    axes = [axis for axis in snapshot["axes"] if axis["score"] is not None]
-    axes.sort(key=lambda axis: axis["score"])
+    axes = sorted(snapshot["axes"], key=lambda axis: (axis["score"] is None, axis["score"] or 0))
     topic = ""
     if item:
         question = data["题目与材料"].get(item) or {}
         topic = question.get("主题编号", "")
-    selected = [axis for axis in axes if not topic or axis["id"].startswith(topic)]
-    weakest = selected[0] if selected else None
+    selected = [axis for axis in axes if not topic or item in axis.get("question_ids", [])]
+    weakest = next((axis for axis in selected if axis["score"] is not None), None)
     return {
         "kind": "profile",
         "snapshot_id": snapshot_id,
@@ -98,15 +101,16 @@ def profile_card(data, snapshot_id, student="", group="", node="", item=""):
 def summary_answer(card, question):
     target = card["target"]["id"]
     where = (" · " + card["node"]) if card["node"] else ""
+    indicators = [axis for axis in card["indicators"] if axis["score"] is not None]
     if card["target"]["kind"] == "student":
-        if not card["indicators"]:
+        if not indicators:
             return f"{target}{where} 暂无有效已评分作答，无法给出得分率。"
-        parts = [f"{axis['label']} {axis['score']}%" for axis in card["indicators"][:4]]
+        parts = [f"{axis['label']} {axis['score']}%" for axis in indicators[:4]]
         return f"{target}{where} 已读取有效作答。" + "；".join(parts) + "。可从指标打开原始作答。"
-    if not card["indicators"]:
+    if not indicators:
         return f"{target}{where} 暂无有效已评分作答，无法判断薄弱项。"
     lines = []
-    for axis in card["indicators"][:3]:
+    for axis in indicators[:3]:
         lines.append(f"{axis['label']} {axis['score']}%（覆盖 {axis['coverage']}/{axis['population']} 人）")
     return f"{target}{where} 最值得先看的指标是：" + "；".join(lines) + "。可查看指标对应的学生作答。"
 
@@ -155,8 +159,14 @@ def make_proposal(conn, kind, payload, title=""):
     return proposal
 
 
+def material_version(document):
+    return hashlib.sha256(json.dumps(document, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
 def proposal_card(item):
-    labels = {"confirm_import": "确认数据", "generate_recommendation": "生成学习建议"}
+    labels = {"confirm_import": "确认数据", "generate_recommendation": "生成学习建议",
+              "publish_material": "发布教学资料", "retry_job": "重试任务",
+              "correct_attempt": "修正作答异常", "revise_draft": "修订学习建议", "revise_material": "校订资料"}
     return {"kind": "proposal", "id": item["id"], "action": item["kind"],
             "title": item.get("title") or labels[item["kind"]],
             "status": item.get("status", "pending"), "payload": item.get("payload", {}),
@@ -191,17 +201,16 @@ def resolve_recommendation(data, snapshot_id, resolved, anchor_event=""):
     return payload, None
 
 
-def deterministic(conn, request):
+def deterministic(conn, request, snapshot):
     """Answer data questions and create operation proposals without a model."""
     question = request.question.strip()
-    snapshot = current_snapshot(conn)
     data = table_data(snapshot) if snapshot else None
     context = {"student": request.student, "group": getattr(request, "group", ""), "node": request.node}
     resolved = resolve(data, question, context) if data else {"candidates": []}
     if re.search(r"导入|上传", question) and not re.search(r"进度|查看|状态|确认|复核|异常|结果", question):
         return {"answer": "请选择本批 XLSX 工作簿，或成组选择名册、课程、测验、题目、作答五张 CSV。",
                 "cards": [{"kind": "import", "title": "选择文件并开始清洗"}]}
-    if RECOMMEND.search(question) or (CONFIRM.search(question) and CLEANING.search(question)):
+    if RECOMMEND.search(question):
         if not snapshot:
             return {"answer": "还没有确认的数据快照，请先导入并确认第一批数据。",
                     "cards": [{"kind": "import", "title": "导入第一批数据"}]}
@@ -233,6 +242,8 @@ def deterministic(conn, request):
                   "done": "本批清洗已完成。"}.get(run["state"], "本批数据正在处理。")
         cards = [card] + ([proposal_card(proposal)] if proposal else [])
         return {"answer": answer, "cards": cards}
+    if not snapshot and VIEW.search(question) and re.search(r"班级|我们班|学生|测验|学情", question):
+        return {"answer": "请先导入并确认第一批数据。", "cards": [{"kind": "import"}]}
     if data and (resolved.get("student") or resolved.get("group")) and VIEW.search(question) and not EXPLAIN.search(question):
         if resolved["candidates"]:
             return {"answer": "找到多个匹配对象，请选择一个。", "cards": [
@@ -250,11 +261,7 @@ def save_session(conn, session_id, request, result):
     if session is None:
         session = {"id": new_id(), "created": now, "turns": [],
                    "context": {"student": "", "group": "", "node": ""}}
-    context = session.get("context", {})
-    if request.session_id:
-        context = {"student": request.student or context.get("student", ""),
-                   "group": getattr(request, "group", "") or context.get("group", ""),
-                   "node": request.node or context.get("node", "")}
+    context = {"student": request.student, "group": request.group, "node": request.node}
     for card in result.get("cards", []):
         if card.get("kind") == "profile" and card.get("target"):
             context = {"student": card["target"]["id"] if card["target"].get("kind") == "student" else "",
@@ -264,7 +271,9 @@ def save_session(conn, session_id, request, result):
             payload = card.get("payload", {})
             context = {"student": payload.get("student", ""), "group": payload.get("group", ""),
                        "node": payload.get("node", "")}
+    context["snapshot_id"] = result.get("snapshot_id", "")
     turn = {"question": request.question, "answer": result.get("answer", ""), "parts": result.get("parts", []),
+            "trace": result.get("trace", []), "mode": result.get("mode"), "context": context,
             "cards": result.get("cards", []), "snapshot_id": result.get("snapshot_id", ""),
             "model": result.get("model", ""), "at": now}
     session["turns"] = (session.get("turns", []) + [turn])[-MAX_TURNS:]

@@ -354,6 +354,67 @@ class WorkflowTests(TestCase):
             with self.assertRaisesRegex(ValueError, "无效引用"):
                 final_review(draft, "test")
 
+    def test_chat_agent_executes_tools_and_preserves_the_evidence_scope(self):
+        batch = self.post_import()
+        self.run_cleaning(batch["run_id"])
+        snapshot = self.confirm(batch).json()["snapshot_id"]
+        observed = []
+
+        def provider(_provider, messages, _session, **options):
+            results = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+            self.assertTrue(options["tools"])
+            observed[:] = results
+            steps = [("resolve_scope", {}), ("read_profile", {}), ("read_evidence", {})]
+            if len(results) == len(steps):
+                return {"role": "assistant", "content": '{"answer":"从覆盖率和分数一起判断。"}'}
+            name, args = steps[len(results)]
+            if name == "read_evidence":
+                args["indicator"] = results[-1]["indicators"][0]["id"]
+            return {"role": "assistant", "content": None, "tool_calls": [{
+                "id": f"call_{len(results)}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args)},
+            }]}
+
+        with patch("backend.main.provider_key", return_value="synthetic"), patch(
+                "backend.chat_agent.complete_with_tools", side_effect=provider):
+            response = self.client.post("/api/learning-chat", json={"use_tools": True,
+                "question": "DC02 最近一次测验，哪个指标最值得先讲？给我看依据。", "snapshot_id": snapshot})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual([step["tool"] for step in body["trace"]], ["resolve_scope", "read_profile", "read_evidence"])
+        self.assertEqual(body["context"]["node"], "N02")
+        self.assertEqual(observed[-1]["snapshot_id"], snapshot)
+        self.assertEqual(observed[-1]["group"], "DC02")
+        self.assertLessEqual(len(observed[-1]["examples"]), 3)
+        session = self.client.get("/api/chat/sessions/" + body["session_id"]).json()
+        self.assertEqual(session["turns"][0]["trace"], body["trace"])
+        observed.clear()
+
+        def propose(_provider, messages, _session, **_options):
+            followup = len(messages) > 2
+            if followup:
+                scope = json.loads(messages[-1]["content"])
+                self.assertEqual((scope["group"], scope["node"]), ("DC02", "N02"))
+            return {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "proposal" if followup else "scope", "type": "function",
+                "function": {"name": "propose_recommendation" if followup else "resolve_scope", "arguments": "{}"},
+            }]}
+
+        with patch("backend.main.provider_key", return_value="synthetic"), patch(
+                "backend.chat_agent.complete_with_tools", side_effect=propose), patch(
+                "backend.main.api_key", return_value="synthetic"):
+            followup = self.client.post("/api/learning-chat", json={"use_tools": True,
+                "question": "给这个班生成建议", "session_id": body["session_id"]})
+            self.assertEqual(followup.status_code, 200, followup.text)
+            proposal = followup.json()["cards"][0]
+            self.assertEqual(proposal["payload"]["snapshot_id"], snapshot)
+            with store.db() as conn:
+                self.assertFalse(any(job["kind"] == "generate" for job in store.all_of(conn, "job")))
+            path = f"/api/chat/proposals/{proposal['id']}/confirm"
+            confirmed = self.client.post(path)
+            self.assertEqual(confirmed.status_code, 200, confirmed.text)
+            self.assertEqual(self.client.post(path).json()["result"], confirmed.json()["result"])
+
     def test_chat_sessions_restore_context_and_keep_result_cards(self):
         batch = self.post_import()
         self.run_cleaning(batch["run_id"])

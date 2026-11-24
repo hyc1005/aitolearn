@@ -460,7 +460,8 @@ function Workbench() {
           onboardingSignal={onboardingSignal}
           openAccess={() => goTo('settings')} openCitation={setCitation} openImport={() => goTo('import')}
           openRun={openRun} openDraft={id => { const found = drafts.find(d => d.id === id); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
-          openProfile={(kind, id, node, indicator) => openProfile(kind, id, node, activeSnapshot, indicator)}
+          openProfile={(kind, id, node, indicator, snapshot) => openProfile(kind, id, node, snapshot || activeSnapshot, indicator)}
+          openPage={goTo}
           onTaskStarted={() => { void refresh(); setOnboardingSignal(value => value + 1) }} />
       </div>
       {page === 'run' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}

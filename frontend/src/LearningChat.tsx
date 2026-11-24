@@ -16,9 +16,11 @@ type CardData = {
 }
 type Result = {
   answer: string; parts: Part[]; model?: string; cards?: CardData[]
+  trace?: { tool: string; status: string; count?: number | null; student?: string; group?: string; node?: string; indicator?: string }[]
+  mode?: string
   snapshot_id?: string; session_id?: string; context?: Context
 }
-type Context = { student: string; group: string; node: string; anchor_event?: string }
+type Context = { student: string; group: string; node: string; anchor_event?: string; snapshot_id?: string }
 type Turn = { question: string; result?: Result; error?: string; context?: Context }
 type Onboarding = {
   state: string; detail: Record<string, any>; dismissed: boolean; completed: boolean
@@ -36,7 +38,8 @@ type Props = {
   openImport: () => void
   openRun: (id: string) => void
   openDraft: (id: string) => void
-  openProfile: (kind: 'student' | 'group', id: string, node: string, indicator: string) => void
+  openProfile: (kind: 'student' | 'group', id: string, node: string, indicator: string, snapshot?: string) => void
+  openPage: (page: string) => void
   onTaskStarted: () => void
   onboardingSignal?: number
 }
@@ -78,6 +81,7 @@ export function LearningChat(props: Props) {
   const [pickerKind, setPickerKind] = useState<'student' | 'group'>('student')
   const bottom = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
   const onboardInput = useRef<HTMLInputElement>(null)
   const onboardingRequest = useRef(0)
   const provider = access?.providers.find(item => item.id === access.active)
@@ -109,9 +113,9 @@ export function LearningChat(props: Props) {
       setContext({ ...{ student: '', group: '', node: '' }, ...(session.context || {}) })
       setTurns((session.turns || []).map((turn: any) => ({
         question: turn.question,
-        context: { student: '', group: '', node: '' },
+        context: turn.context,
         result: { answer: turn.answer, parts: turn.parts || [], cards: turn.cards || [],
-          snapshot_id: turn.snapshot_id, session_id: session.id },
+          trace: turn.trace, mode: turn.mode, snapshot_id: turn.snapshot_id, session_id: session.id },
       })))
     }).catch(() => { setSessionId(''); write(SESSION_KEY, '', localStorage) })
     return () => { active = false }
@@ -182,7 +186,9 @@ export function LearningChat(props: Props) {
         body: JSON.stringify({
           question,
           session_id: sessionId,
-          snapshot_id: props.snapshot || '',
+          snapshot_id: outgoing.snapshot_id ?? props.snapshot ?? '',
+          context_changed: true,
+          use_tools: true,
           student: outgoing.student,
           group: outgoing.group,
           node: outgoing.node,
@@ -226,33 +232,33 @@ export function LearningChat(props: Props) {
 
   function setTarget(kind: 'student' | 'group', value: string) {
     setContext({ student: kind === 'student' ? value : '', group: kind === 'group' ? value : '',
-      node: context.node })
+      node: context.node, snapshot_id: props.snapshot })
     setPickerOpen(false)
   }
 
-  async function readEvidence(student: string, node: string, indicator: string, snapshot?: string) {
+  async function readEvidence(student: string, node: string, indicator: string, snapshot?: string, group = '', item = '') {
     try {
-      const rows = await api(`/profiles/evidence?${new URLSearchParams({ student, node, indicator, snapshot_id: snapshot || props.snapshot || '' })}`)
+      const rows = await api(`/profiles/evidence?${new URLSearchParams({ student, group, node, indicator, item, snapshot_id: snapshot || props.snapshot || '' })}`)
       if (rows[0]) setSource(rows[0])
       else window.alert('该指标暂无有效作答')
       void loadOnboarding()
     } catch (error) { window.alert((error as Error).message) }
   }
 
-  async function upload(files: FileList | null, fromOnboarding = false) {
-    if (!files?.length) return
+  async function upload(files: File[]) {
+    if (!files.length) return
     setBusy(true)
     const body = new FormData()
     Array.from(files).forEach(file => body.append('files', file))
     body.append('mapping', '{}')
+    body.append('chat_session_id', sessionId || 'new')
     try {
-      const started = await api<{ run_id: string; batch_id: string }>('/imports', { method: 'POST', body })
-      const run = await api<any>(`/agent/runs/${started.run_id}`)
-      const card = { kind: 'cleaning', run_id: started.run_id, batch_id: started.batch_id, state: run.state,
-        stage: run.stage || '', label: run.payload?.label || '', report: run.report || null, error: run.error || '' }
-      if (fromOnboarding) setOnboardingBusy(false)
+      const started = await api<{ session_id: string; card: CardData }>('/imports', { method: 'POST', body })
+      setSessionId(started.session_id)
+      write(SESSION_KEY, started.session_id, localStorage)
+      setSelectedFiles([])
       setTurns(current => [...current, { question: '导入 ' + Array.from(files).map(file => file.name).join('、'),
-        context, result: { answer: '文件已接收，正在启动本批清洗。', parts: [], cards: [card] } }])
+        context, result: { answer: '文件已接收，正在启动本批清洗。', parts: [], cards: [started.card] } }])
       props.onTaskStarted()
       void loadOnboarding()
     } catch (error) {
@@ -269,6 +275,8 @@ export function LearningChat(props: Props) {
         result: { ...turn.result, cards: (turn.result.cards || []).map(item => item.id === card.id ? response.proposal : item) },
       }))
       if (response.result?.run_id) props.onTaskStarted()
+      if (card.action === 'confirm_import' && response.result?.snapshot_id)
+        setContext({ student: '', group: '', node: '', snapshot_id: response.result.snapshot_id })
       if (response.result?.snapshot_id) props.onTaskStarted()
     } catch (error) {
       const message = (error as Error).message
@@ -294,12 +302,12 @@ export function LearningChat(props: Props) {
     const override: Partial<Context> = option.kind === 'student'
       ? { student: option.id, group: '', node: context.node }
       : option.kind === 'group' ? { student: '', group: option.id, node: context.node }
-      : { ...context, node: option.id }
+      : { ...context, ...card.context, node: option.id }
     setContext({ ...context, ...override })
     const question = card.intent === 'generate_recommendation'
       ? `帮我为 ${option.id} 生成学习建议`
       : `看看 ${option.id} 的表现`
-    void send(question, override)
+    void send(question, { ...override, snapshot_id: card.snapshot_id || context.snapshot_id })
   }
 
   const onboardingState = onboarding?.state || 'empty'
@@ -319,7 +327,7 @@ export function LearningChat(props: Props) {
               groups.map(group => ({ value: group, label: group + ' · 班级' })))}
             onChange={value => setTarget(pickerKind, value)} />
           <Select aria-label="上下文测验" value={context.node || undefined} allowClear placeholder="全部测验" style={{ minWidth: 150 }}
-            onChange={node => setContext({ ...context, node: node || '' })}
+            onChange={node => setContext({ ...context, node: node || '', snapshot_id: props.snapshot })}
             options={nodes.map(node => ({ value: node, label: node }))} />
           <Typography.Text type="secondary">只影响后续消息，历史回答保留当时的对象和快照。</Typography.Text>
         </div>}>
@@ -336,7 +344,7 @@ export function LearningChat(props: Props) {
       </Space>
     </div>
     <input ref={fileInput} type="file" hidden multiple accept=".csv,.xlsx" onChange={event => {
-      void upload(event.target.files); event.target.value = ''
+      setSelectedFiles(Array.from(event.target.files || [])); event.target.value = ''
     }} />
     {!hideOnboarding && onboarding && <Card className="onboarding-card" title={onboardTitle}
       extra={<Space><Button type="text" onClick={() => { setLater(true); write(LATER_KEY, '1', sessionStorage) }}>稍后</Button>
@@ -345,7 +353,7 @@ export function LearningChat(props: Props) {
       <Space wrap>
         {onboardingState === 'empty' && <>
           <input ref={onboardInput} type="file" hidden multiple accept=".csv,.xlsx" onChange={event => {
-            void upload(event.target.files, true); event.target.value = ''
+            setSelectedFiles(Array.from(event.target.files || [])); event.target.value = ''
           }} />
           <Button type="primary" loading={onboardingBusy} onClick={() => onboardInput.current?.click()}>导入第一批数据</Button>
           <Button onClick={props.openImport}>查看支持的文件</Button>
@@ -400,7 +408,26 @@ export function LearningChat(props: Props) {
             api={api} snapshot={turn.result?.snapshot_id || props.snapshot} context={turn.context || context}
             readEvidence={readEvidence} confirmProposal={confirmProposal} chooseCandidate={chooseCandidate}
             openProfile={props.openProfile} openRun={props.openRun} openImport={props.openImport}
+            openDraft={props.openDraft} openPage={props.openPage}
             fileInput={fileInput} />)}
+          {turn.result.mode === 'without_tools' && <Typography.Text type="secondary">当前模型提供普通对话，可用下方操作按钮继续。</Typography.Text>}
+          {!!turn.result.trace?.length && <details className="spaced"><summary>查看执行过程</summary>
+            <ol>{turn.result.trace.map((step, index) => <li key={index}>
+              {({ resolve_scope: '解析查询对象', read_profile: '读取指标和覆盖人数', read_evidence: '读取原始作答',
+                search_materials: '检索资料', open_import: '选择文件', read_cleaning: '查看清洗进度',
+                propose_recommendation: '准备建议任务', open_page: '定位业务页面', read_exercises: '查找练习',
+                read_jobs: '查询任务', propose_retry: '准备重试', read_material_reviews: '查询待校对资料',
+                read_material_review: '读取待校对段落', propose_publish_material: '准备发布',
+                propose_material_revision: '准备资料修订', read_drafts: '读取建议版本',
+                propose_draft_revision: '准备建议修订', propose_attempt_correction: '准备作答修订',
+              } as Record<string, string>)[step.tool] || '校验工具'}
+              {[step.student || step.group, step.node, step.indicator].filter(Boolean).map(value => ' · ' + value)}
+              {step.count != null && ' · ' + step.count + ' 条'}
+              {' · ' + (({ ok: '已完成', waiting: '等待选择或确认', no_scored_answers: '暂无有效作答',
+                queued: '排队中', running: '进行中', done: '已完成', failed: '任务失败',
+                missing: '未找到对象' } as Record<string, string>)[step.status] || '请求未满足工具条件')}
+            </li>)}</ol>
+          </details>}
           {(turn.result.parts || []).map(({ quote, source }, id) =>
             <blockquote key={id}>
               <p className="preserve">{quote}</p>
@@ -412,6 +439,13 @@ export function LearningChat(props: Props) {
       </article>)}
       <div ref={bottom} />
     </div>
+    {!!selectedFiles.length && <Card size="small" className="chat-card" title="本批待导入文件">
+      <ul>{selectedFiles.map(file => <li key={file.name + file.lastModified}>{file.name}</li>)}</ul>
+      <Space wrap>
+        <Button type="primary" loading={busy} onClick={() => void upload(selectedFiles)}>开始清洗</Button>
+        <Button disabled={busy} onClick={() => setSelectedFiles([])}>取消</Button>
+      </Space>
+    </Card>}
     <form className="chat-composer" onSubmit={submit}>
       <Input.TextArea aria-label="输入学情问题" placeholder={contextLabel ? `询问 ${contextLabel}，或说“帮我生成建议”` : '问一个问题，或说“看看 DC02 最近一次测验”'}
         maxLength={1200} autoSize={{ minRows: 2, maxRows: 5 }} value={draft} onChange={event => setDraft(event.target.value)}
@@ -427,17 +461,23 @@ export function LearningChat(props: Props) {
   </section>
 }
 
-function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposal, chooseCandidate, openProfile, openRun, openImport, fileInput }: {
+function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposal, chooseCandidate, openProfile, openRun, openImport, openDraft, openPage, fileInput }: {
   card: CardData; api: Api; snapshot?: string; context: Context
-  readEvidence: (student: string, node: string, indicator: string, snapshot?: string) => void
+  readEvidence: (student: string, node: string, indicator: string, snapshot?: string, group?: string, item?: string) => void
   confirmProposal: (card: CardData) => void
   chooseCandidate: (option: Record<string, any>, card: CardData) => void
   openProfile: Props['openProfile']; openRun: Props['openRun']; openImport: Props['openImport']
+  openPage: Props['openPage']
+  openDraft: Props['openDraft']
   fileInput: RefObject<HTMLInputElement | null>
 }) {
+  if (card.kind === 'navigation') return <Button onClick={() => openPage(card.page)}>打开{card.title}</Button>
+  if (card.kind === 'exercises') return <Card size="small" className="chat-card" title="相关练习">
+    <ul>{card.items.map((item: { id: string; text: string }) => <li key={item.id}>{item.id} · {item.text}</li>)}</ul>
+  </Card>
   if (card.kind === 'import') return <Card size="small" className="chat-card" title={card.title || '导入第一批数据'}>
     <p>选择 XLSX 工作簿，或成组选择名册、课程、测验、题目、作答 CSV。</p>
-    <Button type="primary" icon={<UploadOutlined />} onClick={() => fileInput.current?.click()}>选择文件并开始清洗</Button>
+    <Button type="primary" icon={<UploadOutlined />} onClick={() => fileInput.current?.click()}>选择文件</Button>
     <Button type="link" onClick={openImport}>打开数据导入</Button>
   </Card>
   if (card.kind === 'candidates') return <Card size="small" className="chat-card" title="请选择对象">
@@ -446,12 +486,12 @@ function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposa
   </Card>
   if (card.kind === 'profile') return <Card size="small" className="chat-card"
     title={(card.target?.kind === 'student' ? '学生 ' : '班级 ') + card.target?.id + (card.node ? ' · ' + card.node : '')}
-    extra={<Button onClick={() => openProfile(card.target?.kind, card.target?.id, card.node || '', card.weakest?.id || '')}>打开画像</Button>}>
+    extra={<Button onClick={() => openProfile(card.target?.kind, card.target?.id, card.node || '', card.weakest?.id || '', card.snapshot_id || snapshot)}>打开画像</Button>}>
     <div className="chat-indicators">{(card.indicators || []).map((axis: Axis) => <div key={axis.id} className="chat-indicator">
       <div><strong>{axis.label}</strong><small>{axis.score == null ? axis.status : axis.score + '%'} · 覆盖 {axis.coverage}/{axis.population} 人 · {axis.n} 条作答</small></div>
       {card.target?.kind === 'student'
-        ? <Button size="small" onClick={() => readEvidence(card.target.id, card.node || '', axis.id, card.snapshot_id || snapshot)}>查看作答</Button>
-        : <Button size="small" onClick={() => openProfile('group', card.target.id, card.node || '', axis.id)}>查看班级分布</Button>}
+        ? <Button size="small" onClick={() => readEvidence(card.target.id, card.node || '', axis.id, card.snapshot_id || snapshot, '', card.item)}>查看作答</Button>
+        : <Button size="small" onClick={() => readEvidence('', card.node || '', axis.id, card.snapshot_id || snapshot, card.target.id, card.item)}>查看原始作答</Button>}
     </div>)}</div>
     {card.item && <Typography.Text type="secondary">题号 {card.item}</Typography.Text>}
   </Card>
@@ -484,16 +524,25 @@ function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposa
   if (card.kind === 'proposal') {
     const confirmed = card.status === 'confirmed'
     return <Card size="small" className="chat-card" title={card.title || '操作提案'}>
-      <p>{confirmed ? (card.action === 'confirm_import' ? '这批数据已确认，后续诊断和建议读取同一快照。'
+      <p>{card.payload?.before !== undefined ? (confirmed ? '修订已提交。' : '核对以下改动后再确认。')
+        : card.action === 'publish_material' ? (confirmed ? '资料已进入发布队列。' : '确认后开始建立索引并发布这个资料版本。')
+        : card.action === 'retry_job' ? (confirmed ? '任务已重新排队。' : '确认后重试这次失败的任务。')
+        : confirmed ? (card.action === 'confirm_import' ? '这批数据已确认，后续诊断和建议读取同一快照。'
         : '建议任务已开始，进度与终审结果会保留在任务详情。')
         : (card.action === 'confirm_import' ? '复核已完成。确认后建立数据快照，后续诊断和建议都读取该快照。'
         : '将使用当前快照生成学情解读、建议草稿并执行独立终审。')}</p>
       {(card.payload?.student || card.payload?.group) && <p><Tag>{card.payload.student || card.payload.group}</Tag><Tag>{card.payload.node || '全部测验'}</Tag></p>}
+      {card.payload?.before !== undefined && <dl>
+        <dt>修改前 {card.payload.field || ''}</dt><dd className="preserve">{card.payload.before || '空白'}</dd>
+        <dt>修改后</dt><dd className="preserve">{card.payload.after}</dd>
+      </dl>}
       {card.details && <p>{card.details}</p>}
       <Space wrap>
         {!confirmed && <Button type="primary" onClick={() => confirmProposal(card)}>确认并继续</Button>}
-        {confirmed && card.result?.run_id && <Button type="primary" onClick={() => openRun(card.result.run_id)}>打开任务</Button>}
+        {confirmed && card.result?.run_id && <ProposalTask id={card.result.run_id} api={api}
+          openRun={openRun} openDraft={openDraft} openPage={openPage} />}
         {confirmed && card.result?.snapshot_id && <Tag color="success">快照已启用</Tag>}
+        {confirmed && card.action === 'revise_material' && <Button onClick={() => openPage('materials')}>打开课程与资料</Button>}
       </Space>
     </Card>
   }
@@ -501,4 +550,32 @@ function ResultCard({ card, api, snapshot, context, readEvidence, confirmProposa
     <Button onClick={() => openRun(card.run_id)}>查看运行详情</Button>
   </Card>
   return null
+}
+
+function ProposalTask({ id, api, openRun, openDraft, openPage }: Pick<Props, 'api' | 'openRun' | 'openDraft' | 'openPage'> & { id: string }) {
+  const [task, setTask] = useState<{ state: string; stage?: string; kind: string; draft_id?: string; error?: string }>()
+  useEffect(() => {
+    let active = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    async function poll() {
+      try {
+        const value = await api<NonNullable<typeof task>>('/chat/tasks/' + encodeURIComponent(id))
+        if (!active) return
+        setTask(value)
+        if (value.state === 'done' || value.state === 'failed') return
+      } catch { /* Retry transient read failures. */ }
+      if (active) timer = setTimeout(poll, 2500)
+    }
+    void poll()
+    return () => { active = false; clearTimeout(timer) }
+  }, [api, id])
+  return <Space wrap>
+    {task && <Tag>{({ queued: '排队中', running: '执行中', done: '已完成', failed: '失败' } as Record<string, string>)[task.state] || task.state}
+      {task.state === 'running' && ' · ' + (({ snapshot: '读取快照', interpret: '学情解读',
+        generate: '生成草稿', final_review: '模型终审' } as Record<string, string>)[task.stage || ''] || '处理任务')}</Tag>}
+    {task?.error && <Typography.Text type="danger">{task.error}</Typography.Text>}
+    <Button onClick={() => task && !['clean', 'generate', 'recommendation_review'].includes(task.kind)
+      ? openPage('settings') : openRun(id)}>打开任务</Button>
+    {task?.draft_id && <Button type="primary" onClick={() => openDraft(task.draft_id!)}>查看建议并审核</Button>}
+  </Space>
 }

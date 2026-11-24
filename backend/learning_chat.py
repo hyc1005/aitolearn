@@ -26,6 +26,8 @@ class ChatRequest(BaseModel):
     node: str = Field(default="", max_length=128)
     session_id: str = Field(default="", max_length=128)
     anchor_event: str = Field(default="", max_length=128)
+    use_tools: bool = False
+    context_changed: bool = False
 
 
 def collect_sources(conn, snapshot, request):
@@ -102,6 +104,10 @@ def reply(request, sources, session):
                         {"role": "user", "content": json.dumps({
                             "question": request.question, "history": request.model_dump()["history"], "sources": evidence
                         }, ensure_ascii=False)}], session, max_tokens=1600)
+    return validated_reply(request, sources, evidence, content, provider)
+
+
+def validated_reply(request, sources, evidence, content, provider, *, require_student_quote=True):
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", content.strip(), flags=re.I | re.S)
     try:
         result = json.loads(fenced[1] if fenced else content)
@@ -128,7 +134,7 @@ def reply(request, sources, session):
         STUDENT_CONTEXT.search(request.question)
         or (ITEM_ID.search(request.question.upper()) and "得分" in request.question)
     )
-    if (asks_about_student or result.get("uses_student_records") is True) and not any(
+    if require_student_quote and (asks_about_student or result.get("uses_student_records") is True) and not any(
             part["source"]["kind"] == "answer" for part in parts):
         answer = "现有作答证据不足，无法确认这位学生在该问题上的表现。可以核对题号或测验范围。"
     if not answer and not parts:

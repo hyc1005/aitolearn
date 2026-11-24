@@ -18,12 +18,13 @@ from keyring.errors import KeyringError
 from pydantic import BaseModel, Field, SecretStr
 
 from .agent import api_key
-from .conversation import (cleaning_card, deterministic, latest_clean, make_proposal, onboarding,
+from .chat_agent import run_chat
+from .conversation import (CORRECTION_FIELDS, cleaning_card, deterministic, latest_clean, make_proposal, material_version, onboarding,
                            proposal_card, resolve, resolve_recommendation, save_session, session_view,
                            settings_get, settings_put)
 from .data import profile, read_file, student_scores
-from .learning_chat import ChatRequest, collect_sources, reply
-from .models import KEY_SERVICE, PROVIDERS, active_provider, complete, provider_config, provider_key
+from .learning_chat import ChatRequest, ChatTurn, collect_sources, reply
+from .models import KEY_SERVICE, PROVIDERS, ToolsUnavailable, active_provider, complete, provider_config, provider_key
 from .recommendation_review import preview_text
 from .search import search
 from .snapshots import current_snapshot, legacy_batches, queue_cleaning, queue_job, table_data
@@ -129,26 +130,39 @@ def test_model_connection(provider: str):
 def learning_chat(request: ChatRequest):
     if not request.question.strip() or any(isinstance(turn, str) and len(turn) > 1200 for turn in request.history):
         raise HTTPException(422, "请输入问题，单条最多 1200 字")
-    if (request.student or request.group or request.node) and not request.snapshot_id:
-        with db() as conn:
-            active = current_snapshot(conn)
-            if active:
-                request.snapshot_id = active["id"]
     with db() as conn:
         session = get(conn, "chat_session", request.session_id) if request.session_id else None
         if session and not request.history:
-            request.history = [{"question": turn["question"], "answer": turn.get("answer", "")[:1200]}
+            request.history = [ChatTurn(question=turn["question"], answer=turn.get("answer", "")[:1200])
                                for turn in session.get("turns", [])[-5:] if turn.get("answer")]
-        if session:
+        if session and not request.context_changed and not (request.student or request.group or request.node):
             context = session.get("context", {})
-            request.student = request.student or context.get("student", "")
-            request.group = request.group or context.get("group", "")
-            request.node = request.node or context.get("node", "")
-        snapshot = require(conn, "snapshot", request.snapshot_id) if request.snapshot_id else None
-        result = deterministic(conn, request)
+            request.student = context.get("student", "")
+            request.group = context.get("group", "")
+            request.node = context.get("node", "")
+        if session and not request.snapshot_id and not request.context_changed:
+            request.snapshot_id = session.get("context", {}).get("snapshot_id", "")
+        active = current_snapshot(conn)
+        snapshot = require(conn, "snapshot", request.snapshot_id) if request.snapshot_id else active
+        request.snapshot_id = snapshot["id"] if snapshot else ""
+        provider = active_provider(conn)
+    result = None
+    mode = "buttons"
+    if request.use_tools and provider_key(provider):
+        try:
+            result = run_chat(request, snapshot, provider)
+            mode = "tools"
+        except ToolsUnavailable:
+            mode = "without_tools"
+        except ValueError as error:
+            raise HTTPException(502, str(error)) from None
+    if result is None:
+        with db() as conn:
+            result = deterministic(conn, request, snapshot)
         if result is None:
             try:
-                sources = collect_sources(conn, snapshot, request)
+                with db() as conn:
+                    sources = collect_sources(conn, snapshot, request)
             except ValueError as error:
                 raise HTTPException(422, str(error)) from None
             try:
@@ -164,14 +178,17 @@ def learning_chat(request: ChatRequest):
                                  for key in ("student", "group", "node")})
                 payload, card = resolve_recommendation(data, snapshot["id"], resolved, request.anchor_event)
                 if payload:
-                    item = make_proposal(conn, "generate_recommendation", payload, title="生成学习建议")
+                    with db() as conn:
+                        item = make_proposal(conn, "generate_recommendation", payload, title="生成学习建议")
                     result["cards"] = [proposal_card(item)]
                 elif card:
                     result["cards"] = [card]
-        result.setdefault("parts", [])
-        result.setdefault("cards", [])
-        active = current_snapshot(conn)
-        result["snapshot_id"] = active["id"] if active else ""
+    result.setdefault("parts", [])
+    result.setdefault("cards", [])
+    result["snapshot_id"] = request.snapshot_id
+    result["mode"] = mode
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         saved = save_session(conn, request.session_id, request, result)
         return {**result, "session_id": saved["id"], "context": saved["context"]}
 
@@ -190,6 +207,16 @@ def chat_proposal(key: str):
     with db() as conn:
         item = require(conn, "proposal", key)
         return proposal_card(item)
+
+
+@app.get("/api/chat/tasks/{key}")
+def chat_task(key: str):
+    with db() as conn:
+        run = require(conn, "job", key)
+        draft_id = (run.get("stages", {}).get("generate") or {}).get("draft_id")
+        draft = get(conn, "draft", draft_id) if draft_id else None
+        return {"state": run["state"], "stage": run.get("stage"), "kind": run["kind"],
+                "draft_id": draft_id if draft else None, "error": run.get("error")}
 
 
 @app.post("/api/chat/proposals/{key}/confirm")
@@ -229,12 +256,63 @@ def confirm_proposal(key: str):
                 })
             run = create_run(conn, Run(student=payload.get("student", ""), group=payload.get("group", ""),
                                        node=payload.get("node", ""), anchor_event=payload.get("anchor_event", ""),
-                                       snapshot_id=payload.get("snapshot_id", "")))
+                                       variant=payload.get("variant", False), snapshot_id=payload.get("snapshot_id", "")))
             result = {"run_id": run["id"], "snapshot_id": active["id"]}
             proposal.update(status="confirmed", result=result, confirmed_at=time.time())
             put(conn, "proposal", key, proposal)
             return {"proposal": proposal_card(proposal), "result": result}
-        raise HTTPException(400, "不支持的操作类型")
+        if proposal["kind"] == "publish_material":
+            doc = require(conn, "material", payload["material_id"])
+            if material_version(doc) != payload["version"]:
+                raise HTTPException(409, "教学资料已变化，请重新核对后发起发布。")
+            run = publish_document(conn, doc)
+        elif proposal["kind"] == "retry_job":
+            item = require(conn, "job", payload["run_id"])
+            if material_version(item) != payload["version"]:
+                raise HTTPException(409, "任务状态已变化，请重新查询后发起重试。")
+            run = retry_run(conn, item)
+        elif proposal["kind"] in {"revise_material", "revise_draft", "correct_attempt"}:
+            result = confirm_chat_revision(conn, proposal["kind"], payload)
+            proposal.update(status="confirmed", result=result, confirmed_at=time.time())
+            put(conn, "proposal", key, proposal)
+            return {"proposal": proposal_card(proposal), "result": result}
+        else:
+            raise HTTPException(400, "不支持的操作类型")
+        result = {"run_id": run["id"]}
+        proposal.update(status="confirmed", result=result, confirmed_at=time.time())
+        put(conn, "proposal", key, proposal)
+        return {"proposal": proposal_card(proposal), "result": result}
+
+
+def confirm_chat_revision(conn, action, payload):
+    if action == "revise_material":
+        doc = require(conn, "material", payload["material_id"])
+        if material_version(doc) != payload["version"]:
+            raise HTTPException(409, "资料版本已变化，请重新核对。")
+        return edit_document(conn, doc["id"], Revision(changes={payload["block_id"]: payload["after"]}))
+    if action == "revise_draft":
+        draft = require(conn, "draft", payload["draft_id"])
+        if material_version(draft) != payload["version"]:
+            raise HTTPException(409, "草稿版本已变化，请重新核对。")
+        saved = edit_draft(conn, draft["id"], Edit(revision=payload["revision"], approved=False,
+            message=payload["after"], exercises=[item["question_id"] for item in draft["exercises"]]))
+        return {"run_id": saved["review_run_id"], "draft_id": saved["id"]}
+    active = current_snapshot(conn)
+    if not active or active["id"] != payload["snapshot_id"]:
+        raise HTTPException(409, "数据快照已变化，请重新核对作答。")
+    event = payload["event_id"]
+    attempts = [row for key in active["batch_ids"] for row in require(conn, "import", key)["rows"]
+                if row["table"] == "作答记录" and row["values"].get("作答事件编号") == event
+                and row["values"].get("修订版本", "").isdigit()]
+    if not attempts:
+        raise HTTPException(409, "找不到可修订的原始作答。")
+    revision = max(int(row["values"]["修订版本"]) for row in attempts)
+    latest = [row for row in attempts if int(row["values"]["修订版本"]) == revision]
+    if len(latest) != 1 or latest[0]["values"].get(payload["field"], "") != payload["before"]:
+        raise HTTPException(409, "作答记录已变化或存在歧义，请在数据导入中选择原始记录。")
+    row = latest[0]
+    return correct_record_in(conn, Correction(source=row["source"], sheet=row["sheet"], line=row["line"],
+        file_id=row.get("file_id"), changes={payload["field"]: payload["after"]}))
 
 
 @app.post("/api/chat/proposals/{key}/refresh")
@@ -385,19 +463,23 @@ def q015_case():
 def retry(key: str):
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        item = require(conn, "job", key)
-        if item["state"] != "failed":
-            raise HTTPException(409, "仅失败任务可以重试")
-        if item["kind"] not in {"clean", "generate", "recommendation_review"}:
-            return job(conn, item["kind"], item["payload"])
-        item["state"] = "queued"
-        item.pop("error", None)
-        put(conn, "job", key, item)
-        return item
+        return retry_run(conn, require(conn, "job", key))
+
+
+def retry_run(conn, item):
+    if item["state"] != "failed":
+        raise HTTPException(409, "仅失败任务可以重试")
+    if item["kind"] not in {"clean", "generate", "recommendation_review"}:
+        return job(conn, item["kind"], item["payload"])
+    item["state"] = "queued"
+    item.pop("error", None)
+    put(conn, "job", item["id"], item)
+    return item
 
 
 @app.post("/api/imports")
-async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}")):
+async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}"),
+                chat_session_id: str | None = Form(None)):
     rows, sources = [], []
     try:
         columns = json.loads(mapping)
@@ -417,7 +499,19 @@ async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}")):
         conn.execute("BEGIN IMMEDIATE")
         batch = {"id": new_id(), "rows": rows, "sources": sources, "mapping": columns,
                  "label": "、".join(source["name"] for source in sources), "confirmed": False}
-        return cleaning_run(queue_cleaning(conn, batch))
+        run = queue_cleaning(conn, batch)
+        result = cleaning_run(run)
+        if chat_session_id is not None:
+            existing = get(conn, "chat_session", chat_session_id) or {}
+            context = existing.get("context", {})
+            card, _ = cleaning_card(conn, run)
+            answer = {"answer": "文件已接收，正在启动本批清洗。", "cards": [card],
+                      "snapshot_id": context.get("snapshot_id", "")}
+            request = ChatRequest(question=("导入 " + batch["label"])[:1200],
+                                  **{key: context.get(key, "") for key in ("student", "group", "node")})
+            saved = save_session(conn, chat_session_id, request, answer)
+            result.update(session_id=saved["id"], card=card)
+        return result
 
 
 def cleaning_run(item):
@@ -509,32 +603,35 @@ class Correction(BaseModel):
 
 @app.post("/api/imports/corrections")
 def correct_record(edit: Correction):
-    allowed = {"学生编号", "材料编号", "主题编号", "节点编号", "评分状态", "得分", "满分", "评分点得分"}
-    if not edit.changes or not edit.changes.keys() <= allowed:
-        raise HTTPException(400, "仅支持修正作答关联和评分字段")
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        active = current_snapshot(conn)
-        if not active:
-            raise HTTPException(409, "请先确认数据快照")
-        rows = [row for key in active["batch_ids"] for row in require(conn, "import", key)["rows"]]
-        candidates = [r for r in rows if r["table"] == "作答记录"
-                      and (r["source"], r["sheet"], r["line"]) == (edit.source, edit.sheet, edit.line)
-                      and (edit.file_id is None or r.get("file_id") == edit.file_id)]
-        if len(candidates) != 1 or not candidates[0]["values"].get("作答事件编号"):
-            raise HTTPException(409, "无法唯一定位该作答事件")
-        source = candidates[0]
-        event = source["values"]["作答事件编号"]
-        version = max((int(r["values"]["修订版本"]) for r in rows
-                       if r["table"] == "作答记录" and r["values"]["作答事件编号"] == event
-                       and r["values"]["修订版本"].isdigit()), default=0) + 1
-        key = new_id()
-        values = {**source["values"], **edit.changes, "修订版本": str(version), "记录编号": key}
-        revision = {**source, "values": values, "source": "教师修订-" + key[:8]}
-        original = {field: source[field] for field in ("source", "sheet", "line", "file_id") if field in source}
-        batch = {"id": key, "confirmed": False, "rows": [revision], "sources": [],
-                 "correction": True, "revision_of": original, "label": revision["source"]}
-        return cleaning_run(queue_cleaning(conn, batch))
+        return correct_record_in(conn, edit)
+
+
+def correct_record_in(conn, edit):
+    if not edit.changes or not edit.changes.keys() <= CORRECTION_FIELDS:
+        raise HTTPException(400, "仅支持修正作答关联和评分字段")
+    active = current_snapshot(conn)
+    if not active:
+        raise HTTPException(409, "请先确认数据快照")
+    rows = [row for key in active["batch_ids"] for row in require(conn, "import", key)["rows"]]
+    candidates = [r for r in rows if r["table"] == "作答记录"
+                  and (r["source"], r["sheet"], r["line"]) == (edit.source, edit.sheet, edit.line)
+                  and (edit.file_id is None or r.get("file_id") == edit.file_id)]
+    if len(candidates) != 1 or not candidates[0]["values"].get("作答事件编号"):
+        raise HTTPException(409, "无法唯一定位该作答事件")
+    source = candidates[0]
+    event = source["values"]["作答事件编号"]
+    version = max((int(r["values"]["修订版本"]) for r in rows
+                   if r["table"] == "作答记录" and r["values"]["作答事件编号"] == event
+                   and r["values"]["修订版本"].isdigit()), default=0) + 1
+    key = new_id()
+    values = {**source["values"], **edit.changes, "修订版本": str(version), "记录编号": key}
+    revision = {**source, "values": values, "source": "教师修订-" + key[:8]}
+    original = {field: source[field] for field in ("source", "sheet", "line", "file_id") if field in source}
+    batch = {"id": key, "confirmed": False, "rows": [revision], "sources": [],
+             "correction": True, "revision_of": original, "label": revision["source"]}
+    return cleaning_run(queue_cleaning(conn, batch))
 
 
 @app.get("/api/imports/issues.csv")
@@ -588,7 +685,7 @@ def profiles(student: str = "", group: str = "", node: str = "", snapshot_id: st
 
 
 @app.get("/api/profiles/evidence")
-def evidence(indicator: str, student: str = "", group: str = "", node: str = "", snapshot_id: str = ""):
+def evidence(indicator: str, student: str = "", group: str = "", node: str = "", snapshot_id: str = "", item: str = ""):
     with db() as conn:
         active = require(conn, "snapshot", snapshot_id) if snapshot_id else current_snapshot(conn)
         data = table_data(active)
@@ -597,7 +694,7 @@ def evidence(indicator: str, student: str = "", group: str = "", node: str = "",
     if selected is None:
         raise HTTPException(404, "指标不存在")
     rows = [{**row, "题目": data["题目与材料"][row["材料编号"]]} for key in selected["attempt_ids"]
-            if (row := data["作答记录"].get(key))]
+            if (row := data["作答记录"].get(key)) and (not item or row["材料编号"] == item)]
     if student and rows and active:
         with db() as conn:
             settings_put(conn, "onboarding_viewed_answer", {
@@ -688,33 +785,40 @@ class Revision(BaseModel):
 def edit_material(key: str, revision: Revision):
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        doc = require(conn, "material", key)
-        if doc["state"] not in {"review", "published"}:
-            raise HTTPException(409, "该资料尚不可编辑")
-        if doc["state"] == "published":
-            key = new_id()
-            doc = {**doc, "id": key, "replaces": doc["id"], "state": "review"}
-            for block in doc["blocks"]:
-                old = block["id"]
-                block.update(id=new_id(), material=key, text=revision.changes.get(old, block["text"]))
-                block.pop("vector", None)
-        else:
-            for block in doc["blocks"]:
-                block["text"] = revision.changes.get(block["id"], block["text"])
-        put(conn, "material", key, doc)
-        return {"id": key}
+        return edit_document(conn, key, revision)
+
+
+def edit_document(conn, key, revision):
+    doc = require(conn, "material", key)
+    if doc["state"] not in {"review", "published"}:
+        raise HTTPException(409, "该资料尚不可编辑")
+    if doc["state"] == "published":
+        key = new_id()
+        doc = {**doc, "id": key, "replaces": doc["id"], "state": "review"}
+        for block in doc["blocks"]:
+            old = block["id"]
+            block.update(id=new_id(), material=key, text=revision.changes.get(old, block["text"]))
+            block.pop("vector", None)
+    else:
+        for block in doc["blocks"]:
+            block["text"] = revision.changes.get(block["id"], block["text"])
+    put(conn, "material", key, doc)
+    return {"id": key}
 
 
 @app.post("/api/materials/{key}/publish")
 def publish(key: str):
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        doc = require(conn, "material", key)
-        if doc["state"] != "review" or not any(c["text"].strip() for c in doc["blocks"]):
-            raise HTTPException(409, "资料尚不可发布")
-        doc["state"] = "indexing"
-        put(conn, "material", key, doc)
-        return job(conn, "publish", {"material": key})
+        return publish_document(conn, require(conn, "material", key))
+
+
+def publish_document(conn, doc):
+    if doc["state"] != "review" or not any(c["text"].strip() for c in doc["blocks"]):
+        raise HTTPException(409, "资料尚不可发布")
+    doc["state"] = "indexing"
+    put(conn, "material", doc["id"], doc)
+    return job(conn, "publish", {"material": doc["id"]})
 
 
 class Run(BaseModel):
@@ -781,52 +885,56 @@ class Edit(BaseModel):
 def edit(key: str, edit: Edit):
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        draft = require(conn, "draft", key)
-        if edit.revision != draft["revision"]:
-            raise HTTPException(409, "建议已更新，请刷新")
-        by_id = {q["question_id"]: q for q in draft["exercises"]}
-        if set(edit.exercises) != by_id.keys() or len(edit.exercises) != len(by_id):
-            raise HTTPException(400, "练习排序无效")
-        if set(edit.hints) - by_id.keys() or any(
-                not 1 <= len(hints) <= 4 or any(not hint.strip() or len(hint) > 1200 for hint in hints)
-                for hints in edit.hints.values()):
-            raise HTTPException(400, "每道练习需要 1 至 4 条有效提示")
-        exercises = [{**by_id[key], "hints": edit.hints.get(key, by_id[key]["hints"])}
-                     for key in edit.exercises]
-        before = [q["question_id"] for q in draft["exercises"]]
-        changed = edit.exercises != before or edit.message != draft.get("message", draft.get("follow_up", ""))
-        changed = changed or any(hints != by_id[key]["hints"] for key, hints in edit.hints.items())
-        copy = {field: val for field in ("observation", "uncertainty") if (val := getattr(edit, field)) is not None}
-        if edit.teaching_texts is not None:
-            points = draft.get("teaching_points", [])
-            if len(edit.teaching_texts) != len(points) or any(
-                    not line.strip() or len(line) > 800 for line in edit.teaching_texts):
-                raise HTTPException(400, "请保留各条教学说明及其引用")
-            copy["teaching_points"] = [{**point, "text": line}
-                                       for point, line in zip(points, edit.teaching_texts)]
-        changed = changed or any(value != draft.get(field) for field, value in copy.items())
-        if changed:
-            if not draft.get("snapshot_id"):
-                raise HTTPException(409, "历史建议未登记证据版本，请重新生成")
-            draft.update(exercises=exercises, message=edit.message,
-                         revision=draft["revision"] + 1, approved=False, updated=time.time(),
-                         review_state="pending", **copy)
-            draft.pop("final_review", None)
-            item = job(conn, "recommendation_review", {"draft": key, "revision": draft["revision"],
-                                                        "snapshot_id": draft.get("snapshot_id"),
-                                                        "student": draft["student"], "group": draft["group"]})
-            draft["review_run_id"] = item["id"]
-        elif edit.approved:
-            review_job = get(conn, "job", draft.get("review_run_id", ""))
-            if (not draft.get("snapshot_id") or draft.get("review_state") != "pass"
-                    or not review_job or review_job["state"] != "done"):
-                raise HTTPException(409, "当前建议版本需先通过模型终审")
-            draft.update(approved=True, updated=time.time())
-            put(conn, "job", review_job["id"], {**review_job, "stage": "published",
-                                                "confirmed_at": time.time()})
-        put(conn, "draft", key, draft)
-        put(conn, "draft_revision", f'{key}:{draft["revision"]}', draft)
-        return draft
+        return edit_draft(conn, key, edit)
+
+
+def edit_draft(conn, key, edit):
+    draft = require(conn, "draft", key)
+    if edit.revision != draft["revision"]:
+        raise HTTPException(409, "建议已更新，请刷新")
+    by_id = {q["question_id"]: q for q in draft["exercises"]}
+    if set(edit.exercises) != by_id.keys() or len(edit.exercises) != len(by_id):
+        raise HTTPException(400, "练习排序无效")
+    if set(edit.hints) - by_id.keys() or any(
+            not 1 <= len(hints) <= 4 or any(not hint.strip() or len(hint) > 1200 for hint in hints)
+            for hints in edit.hints.values()):
+        raise HTTPException(400, "每道练习需要 1 至 4 条有效提示")
+    exercises = [{**by_id[key], "hints": edit.hints.get(key, by_id[key]["hints"])}
+                 for key in edit.exercises]
+    before = [q["question_id"] for q in draft["exercises"]]
+    changed = edit.exercises != before or edit.message != draft.get("message", draft.get("follow_up", ""))
+    changed = changed or any(hints != by_id[key]["hints"] for key, hints in edit.hints.items())
+    copy = {field: val for field in ("observation", "uncertainty") if (val := getattr(edit, field)) is not None}
+    if edit.teaching_texts is not None:
+        points = draft.get("teaching_points", [])
+        if len(edit.teaching_texts) != len(points) or any(
+                not line.strip() or len(line) > 800 for line in edit.teaching_texts):
+            raise HTTPException(400, "请保留各条教学说明及其引用")
+        copy["teaching_points"] = [{**point, "text": line}
+                                   for point, line in zip(points, edit.teaching_texts)]
+    changed = changed or any(value != draft.get(field) for field, value in copy.items())
+    if changed:
+        if not draft.get("snapshot_id"):
+            raise HTTPException(409, "历史建议未登记证据版本，请重新生成")
+        draft.update(exercises=exercises, message=edit.message,
+                     revision=draft["revision"] + 1, approved=False, updated=time.time(),
+                     review_state="pending", **copy)
+        draft.pop("final_review", None)
+        item = job(conn, "recommendation_review", {"draft": key, "revision": draft["revision"],
+                                                    "snapshot_id": draft.get("snapshot_id"),
+                                                    "student": draft["student"], "group": draft["group"]})
+        draft["review_run_id"] = item["id"]
+    elif edit.approved:
+        review_job = get(conn, "job", draft.get("review_run_id", ""))
+        if (not draft.get("snapshot_id") or draft.get("review_state") != "pass"
+                or not review_job or review_job["state"] != "done"):
+            raise HTTPException(409, "当前建议版本需先通过模型终审")
+        draft.update(approved=True, updated=time.time())
+        put(conn, "job", review_job["id"], {**review_job, "stage": "published",
+                                            "confirmed_at": time.time()})
+    put(conn, "draft", key, draft)
+    put(conn, "draft_revision", f'{key}:{draft["revision"]}', draft)
+    return draft
 
 
 @app.get("/api/recommendations/{key}/preview")
