@@ -47,7 +47,8 @@ class ModelTransportTests(unittest.TestCase):
 
     def test_credentials_and_context_are_not_retried(self):
         for response, expected in [(httpx.Response(401), "credentials"),
-                                   (httpx.Response(400, json={"error": {"code": "context_length_exceeded"}}), "context")]:
+                                   (httpx.Response(400, json={"error": {"code": "context_length_exceeded"}}), "context"),
+                                   (httpx.Response(400, json={"error": {"message": "max_tokens must be at most 8192"}}), "output_budget")]:
             with self.subTest(expected=expected):
                 code, calls, _ = self.call([response])
                 self.assertEqual((code, calls), (expected, 1))
@@ -63,6 +64,27 @@ class ModelTransportTests(unittest.TestCase):
                     with self.assertRaises(ModelRequestError) as failed:
                         structured_review(CleaningReview, "", {}, "test")
                 self.assertEqual(failed.exception.code, expected)
+
+    def test_structured_output_limit_reaches_upstream_request(self):
+        received = []
+
+        def reply(request):
+            import json
+            received.append(json.loads(request.content)['max_tokens'])
+            return httpx.Response(200, json={"id": "fixture", "model": "stub", "object": "chat.completion", "created": 1,
+                "choices": [{"index": 0, "finish_reason": "length", "message": {"role": "assistant", "content": "{}"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 8000, "total_tokens": 8010}})
+
+        def transport(provider, model, session, **kwargs):
+            return ModelTransport(provider, model, session, transport=httpx.MockTransport(reply), **kwargs)
+
+        with patch('backend.agent.active_provider', return_value='stub'), patch('backend.agent.provider_key', return_value='fake'), \
+             patch('backend.agent.provider_config', return_value={'model': 'stub', 'base_url': 'https://test.invalid/v1'}), \
+             patch('backend.agent.ModelTransport', side_effect=transport):
+            with self.assertRaises(ModelRequestError) as failed:
+                structured_review(CleaningReview, '', {}, 'test', max_tokens=8000)
+        self.assertEqual(failed.exception.code, 'truncated')
+        self.assertEqual(received, [8000])
 
     def test_representative_samples_keep_anchor_and_cover_score_bands(self):
         rows = {str(index): {"得分": score, "满分": 10, "节点编号": node}

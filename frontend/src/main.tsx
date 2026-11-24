@@ -13,6 +13,7 @@ import { Diagnostics, type DiagnosticSelection, type DiagnosticAxis, type Profil
 import { AnswerEvidence } from './AnswerEvidence'
 import { applyWorkbenchPalette, chartComparisonColor, workbenchTheme } from './workbenchTheme'
 import { LearningChat } from './LearningChat'
+import { MaterialUpload } from './MaterialUpload'
 import { ModelAccessPage, type ModelAccess } from './ModelAccess'
 import './style.css'
 
@@ -183,6 +184,7 @@ function Workbench() {
   const [profileSnapshot, setProfileSnapshot] = useState('')
   const [focusIndicator, setFocusIndicator] = useState('')
   const [citation, setCitation] = useState<Row>()
+  const citationTrigger = useRef<HTMLElement | null>(null)
   const [doc, setDoc] = useState<Row>()
   const [changes, setChanges] = useState<Record<string, string>>({})
   const [lookup, setLookup] = useState('')
@@ -463,11 +465,13 @@ function Workbench() {
         launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
       <div hidden={page !== 'chat'}>
         <LearningChat active={page === 'chat'} snapshot={activeSnapshot}
+          pendingRun={latestClean?.stage === 'confirm' && latestClean.state === 'done' ? latestClean.id : undefined}
+          openAdvice={target => setNewAdvice(target)}
           students={(data.snapshot_id === activeSnapshot ? students : []) as Parameters<typeof LearningChat>[0]['students']}
           groups={(data.snapshot_id === activeSnapshot ? groups : []).map(group => group.group)}
           nodes={data.snapshot_id === activeSnapshot ? data.nodes : []} access={modelAccess} api={api}
-          openAccess={() => goTo('settings')} openCitation={setCitation} openImport={() => goTo('import')}
-          openRun={openRun} openDraft={id => { const found = drafts.find(d => d.id === id); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
+          openAccess={() => goTo('settings')} openCitation={(value, trigger) => { citationTrigger.current = trigger; setCitation(value) }} openImport={() => goTo('import')}
+          openMaterial={id => void openDoc(id)} openRun={openRun} openDraft={id => { const found = drafts.find(d => d.id === id); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
           openProfile={(kind, id, node, indicator, snapshot) => openProfile(kind, id, node, snapshot || activeSnapshot, indicator)}
           openPage={goTo}
           onTaskStarted={() => { void refresh() }} />
@@ -577,11 +581,16 @@ function Workbench() {
               })}>{q.材料编号}</Button>)}
           </Space> }}
           columns={['主题', '观察指标', '课标整理编号', '课标文件页／正文页', '教材正文页'].map(k => ({ title: k, dataIndex: k }))} /></Card>
-        <Card title="教学资料" extra={<Button onClick={() => perform(async () => { const r = await api('/materials/seed-text', post); await refresh(); await openDoc(r.id) })}>整理已导入题库</Button>}>
-          <Input type="file" accept=".pdf,.doc,.docx,.png,.jpeg,.jpg,.webp" onChange={e => { const file = e.target.files?.[0]; if (file) void perform(async () => {
-            const body = new FormData(); body.append('file', file); await api('/materials', { ...post, body }); await refresh()
-          }) }} />
-          <div className="books">{materials.map(d => <button key={d.id} className="book" onClick={() => openDoc(d.id)}><BookOutlined /> <strong>{d.name}</strong><small>{({ processing: '解析中', review: '待校对', indexing: '建索引中', published: '已发布', replaced: '已替代' } as Row)[d.state] || d.state}</small></button>)}</div>
+        <Card title="上传的教学资料">
+          <MaterialUpload api={api} refresh={refresh} />
+          {!materials.some(d => d.source !== 'imported_question_bank') && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未上传教材文件" />}
+          <div className="books">{materials.filter(d => d.source !== 'imported_question_bank').map(d => <button key={d.id} className="book" onClick={() => openDoc(d.id)}><BookOutlined /> <strong>{d.name}</strong><small>{({ processing: '解析中', failed: '解析失败', review: '待校对', indexing: '建索引中', published: '已发布', replaced: '已替代' } as Row)[d.state] || d.state}</small></button>)}</div>
+        </Card>
+        <Card title="学情题库摘录（非上传教材）">
+          <Paragraph type="secondary">摘录来自已导入的「题目与材料」表，不是教材文件，也不经过 OCR。只有手动整理并确认发布后才进入检索。</Paragraph>
+          <Button disabled={!activeSnapshot} onClick={() => perform(async () => { const r = await api('/materials/seed-text', post); await refresh(); await openDoc(r.id) })}>整理为待校对摘录</Button>
+          <div className="books">{materials.filter(d => d.source === 'imported_question_bank').map(d =>
+            <button key={d.id} className="book" onClick={() => openDoc(d.id)}><BookOutlined /> <strong>{d.name}</strong><small>{d.state === 'published' ? '已发布摘录' : d.state === 'replaced' ? '已替代' : '待校对摘录'}</small></button>)}</div>
         </Card>
         <Card title="检索已发布资料"><Input.Search value={lookup} onChange={e => setLookup(e.target.value)} onSearch={v => perform(async () => setHits(await api('/materials/search' + query({query: v})) ))} enterButton="查找" />
           {hits.map(h => <Paragraph key={h.id} className="spaced"><Button type="link" onClick={() => setCitation(h)}>{h.title} · {h.locator}</Button> {h.text.slice(0, 130)}</Paragraph>)}</Card>
@@ -702,7 +711,12 @@ function Workbench() {
       </>}
     </Drawer>
     <Drawer open={!!doc} title={doc?.name} size={850} onClose={() => setDoc(undefined)}>
-      {doc && <><Space><Tag>{doc.state}</Tag><Button disabled={!['review','published'].includes(doc.state) || !Object.keys(changes).length} onClick={() => perform(async () => {
+      {doc && <>
+        {doc.error && <Alert type="error" title={doc.error} />}
+        {doc.extraction && <Paragraph type="secondary">PDF 文字层 {doc.extraction.text_pages} 页 · {doc.extraction.ocr_units
+          ? (doc.extraction.ocr_engine || 'OCR') + ' ' + doc.extraction.ocr_units + ' 处' : '本资料未使用 OCR'}</Paragraph>}
+        {doc.source === 'imported_question_bank' && <Paragraph type="secondary">来源：已导入的题目与材料表；非上传教材</Paragraph>}
+        <Space><Tag>{doc.state}</Tag><Button disabled={!['review','published'].includes(doc.state) || !Object.keys(changes).length} onClick={() => perform(async () => {
         const result = await api('/materials/' + doc.id, json('PUT', { changes })); await openDoc(result.id); await refresh()
       })}>保存校订</Button><Button type="primary" disabled={doc.state !== 'review' || !!Object.keys(changes).length} onClick={() => perform(async () => {
         await api('/materials/' + doc.id + '/publish', post); setDoc(undefined); await refresh()
@@ -712,7 +726,8 @@ function Workbench() {
         <Input.TextArea value={changes[c.id] ?? c.text} onChange={e => setChanges({ ...changes, [c.id]: e.target.value })} autoSize={{ minRows: 2, maxRows: 8 }} />
       </Card>)}</>}
     </Drawer>
-    <Drawer open={!!citation} title={citation?.title + ' · ' + citation?.locator} size={730} onClose={() => setCitation(undefined)}>
+    <Drawer open={!!citation} title={citation?.title + ' · ' + citation?.locator} size="min(730px, 100vw)" onClose={() => setCitation(undefined)}
+      afterOpenChange={open => { if (!open) { citationTrigger.current?.focus({ preventScroll: true }); citationTrigger.current = null } }}>
       {citation && <><Paragraph className="preserve">{citation.text}</Paragraph><SourcePage key={citation.id} citation={citation} /></>}
     </Drawer>
     <Drawer open={!!bindingStudent} title={'投递群组 · ' + bindingStudent} size="min(500px, 100vw)"

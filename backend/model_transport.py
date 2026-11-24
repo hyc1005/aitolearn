@@ -24,6 +24,7 @@ MESSAGES = {
     "configuration": "模型平台拒绝了请求，请检查模型设置",
     "quota": "模型平台余额或额度不足",
     "context": "本次模型输入超过可用上下文，请缩小查询范围",
+    "output_budget": "模型平台不支持本次请求的输出上限",
     "empty": "模型返回空内容",
     "truncated": "模型输出已截断",
     "json": "模型输出无法解析为 JSON",
@@ -51,6 +52,9 @@ def response_code(response):
         return ""
     if status in (400, 413, 422):
         text = response.text[:2000].lower()
+        if status != 413 and any(field in text for field in ("max_tokens", "max_completion_tokens", "max output tokens")) and any(
+                marker in text for marker in ("limit", "maximum", "range", "less than", "greater than", "at most", "too large", "invalid")):
+            return "output_budget"
         if status == 413 or any(marker in text for marker in (
             "context_length", "context length", "context window", "too many tokens", "maximum context",
         )):

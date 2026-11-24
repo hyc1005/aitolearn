@@ -12,13 +12,13 @@ class Claim(BaseModel):
     model_config = ConfigDict(extra="forbid")
     indicator_id: str
     evidence_ids: list[str] = Field(max_length=4)
-    detail: str = Field(min_length=1, max_length=700)
+    detail: str = Field(min_length=1, max_length=320)
 
 
 class Interpretation(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    summary: str = Field(min_length=1, max_length=1600)
-    claims: list[Claim] = Field(max_length=6)
+    summary: str = Field(min_length=1, max_length=450)
+    claims: list[Claim] = Field(max_length=3)
 
 
 class FinalReview(BaseModel):
@@ -62,7 +62,7 @@ def interpret(tables, payload, session):
                            "status": axis["status"], "sample_ids": candidates[key]}
                       for key, axis in axes.items()}, "samples": samples, "anchor_event": anchor}
     instruction = (
-        "解读数学学情。选择最多三条有代表性的指标。indicator_id 必须是 axes 的键。"
+        "解读数学学情。不要逐项复述数据，summary 控制在 150 字以内，最多三条结论，每条 detail 不超过 100 字。indicator_id 必须是 axes 的键。"
         "evidence_ids 必须逐字复制该指标 sample_ids 内的事件编号，不能填写题号。"
         "有有效作答时使用作答支持判断，样本不足只提出观察。单次失误不得推广为稳定困难。"
         "anchor_event 非空时至少一条结论引用该作答事件。无证据时 claims 留空，summary 说明需要补充什么。"
@@ -83,11 +83,29 @@ def interpret_facts(facts, instruction, session, snapshot_id):
     axes = facts["axes"]
     anchor = facts["anchor_event"]
     candidates = {key: axis["sample_ids"] for key, axis in axes.items()}
-    for attempt in range(2):
+    budget = 12000
+    shortened = False
+    provider_fallback = False
+    for attempt in range(3):
         try:
-            review, model = structured_review(Interpretation, instruction, facts, f"{session}-interpret-{attempt}")
+            review, model = structured_review(Interpretation, instruction, facts, f"{session}-interpret-{attempt}",
+                                             max_tokens=budget)
         except ModelRequestError as error:
-            if attempt or error.code not in {"json", "schema"}:
+            if error.code in {"truncated", "output_budget"}:
+                if attempt == 2 or provider_fallback:
+                    raise ModelRequestError(error.code, "已调整输出预算并缩短解读格式，仍未收到完整结果。请更换后台模型或缩小解读范围。") from None
+                if error.code == "output_budget":
+                    provider_fallback = True
+                    budget = 6000
+                elif budget < 16000:
+                    budget = 16000
+                else:
+                    raise
+                if not shortened:
+                    shortened = True
+                    instruction += " 只写一段不超过 100 字的总结和一条有证据的要点；有指定锚点时优先引用它。"
+                continue
+            if attempt >= 1 or error.code not in {"json", "schema"}:
                 raise
             instruction += f" 上次输出需要修正：{error}。"
             continue

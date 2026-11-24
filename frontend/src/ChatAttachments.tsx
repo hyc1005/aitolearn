@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Alert, Button, Drawer, Input, Select, Space, Tag } from 'antd'
 import { ActiveStatus } from './ActiveStatus'
 import type { Api } from './ModelAccess'
@@ -7,11 +7,21 @@ type Inspection = { name: string; classification: string; reason: string; excerp
 export type Reference = { name: string; excerpt: string }
 const names: Record<string,string> = { data:'学情数据', material:'教学资料', unknown:'需人工判断', reference:'本轮参考' }
 
-export function ChatAttachments({api, close, useReferences, openRun, openImport, openMaterials, context}: {
+export function ChatAttachments({api, close, useReferences, openRun, openImport, openMaterials, context, autoSubmit}: {
+  autoSubmit: (files: File[], batch: string, target: string) => Promise<void>
   api: Api; close: () => void; useReferences: (rows: Reference[]) => void; openRun: (id: string) => void
   openImport: () => void; openMaterials: () => void; context: {student:string;group:string}
 }) {
-  const [mode, setMode] = useState('project')
+  const [mode, setMode] = useState('auto')
+  const retryBatch = useRef<{files: File[]; id: string; target: string} | undefined>(undefined)
+  async function startAuto(batch: {files: File[]; id: string; target: string}) {
+    if (!batch.files.length) return
+    retryBatch.current = batch
+    setBusy(true); setError('')
+    try { await autoSubmit(batch.files,batch.id,batch.target); close() }
+    catch (err) { setError((err as Error).message) }
+    finally { setBusy(false) }
+  }
   const [rows,setRows] = useState<{file:File; info:Inspection}[]>([])
   const [busy,setBusy] = useState(false)
   const [error,setError] = useState('')
@@ -76,12 +86,18 @@ export function ChatAttachments({api, close, useReferences, openRun, openImport,
   const references = rows.flatMap(({info})=>info.excerpt ? [{name:info.name,excerpt:info.excerpt}] : [])
   return <Drawer open title="添加本机文件" onClose={busy ? undefined : close} closable={!busy} mask={{closable:!busy}}>
     <Space orientation="vertical" style={{width:'100%'}}>
-      <Select aria-label="附件用途" value={mode} disabled={busy || !!done.length} onChange={value=>{setMode(value);setRows([]);setError('')}}
-        options={[{value:'project',label:'导入项目（先分组预检）'},{value:'reference',label:'仅本轮参考（不入库）'}]} />
-      <p>{mode === 'reference' ? '最多 3 个文件；仅发送界面显示的文字摘录给本轮模型。' : '只检查选中的文件。业务表与教材分开处理；无法识别的文件不会提交。'}</p>
-      <input key={mode} type="file" multiple aria-label="选择本机文件" disabled={busy || !!done.length} onChange={e=>void inspect(Array.from(e.target.files || []))} />
+      <Select aria-label="附件用途" value={mode} disabled={busy || !!done.length} onChange={value=>{setMode(value);setRows([]);setError('');retryBatch.current=undefined}}
+        options={[{value:'auto',label:'自动处理并在对话中跟踪'},{value:'project',label:'手动预检并分组导入'},{value:'reference',label:'仅本轮参考（不入库）'}]} />
+      <p>{mode === 'auto' ? '选中文件即开始自动分组、清洗或解析。不会自动启用快照，也不会发布资料。' : mode === 'reference' ? '最多 3 个文件；仅发送界面显示的文字摘录给本轮模型。' : '只检查选中的文件。业务表与教材分开处理；无法识别的文件不会提交。'}</p>
+      <input key={mode} type="file" multiple aria-label="选择本机文件" disabled={busy || !!done.length || (mode === 'auto' && !!continueKind && !entity.trim())}
+        onChange={e=>{
+          const files=Array.from(e.target.files || [])
+          if (mode === 'auto') void startAuto({files,id:crypto.randomUUID(),target:continueKind ? continueKind+':'+entity.trim() : ''})
+          else void inspect(files)
+        }} />
       {busy && <ActiveStatus label="正在处理本批文件" />}
-      {error && <Alert type="error" title={error} />}
+      {error && <Alert type="error" title={error} action={mode==='auto' && retryBatch.current
+        ? <Button disabled={busy} onClick={()=>{if(retryBatch.current) void startAuto(retryBatch.current)}}>重试本批</Button> : undefined} />}
       {rows.map(({info,file})=><section key={file.name} className="attachment-row"><Tag>{done.includes(file.name) ? '已提交' : names[info.classification]}</Tag><strong>{info.name}</strong><p>{info.reason}</p>
         {info.excerpt && <details><summary>查看将发送的摘录</summary><p className="preserve">{info.excerpt}</p></details>}</section>)}
       {mode === 'project' && !done.length && tables.some(r=>r.info.classification==='unknown' && /^(缺少必需列|未识别到)/.test(r.info.reason)) &&
@@ -91,11 +107,11 @@ export function ChatAttachments({api, close, useReferences, openRun, openImport,
       {!!Object.keys(suggestion).length && <Alert type="info" title="请核对表头映射，再重新预检"
         description={Object.entries(suggestion).map(([from,to])=>from+' → '+to).join('、')}
         action={<Button disabled={busy} onClick={()=>void inspect(rows.map(r=>r.file), {...mapping,...suggestion})}>应用并预检</Button>}/>}
-      {mode === 'project' && !!data.length && <><Select aria-label="快照确认后继续" value={continueKind} disabled={busy} onChange={kind=>{setContinueKind(kind);setEntity(kind === 'student' ? context.student : kind === 'group' ? context.group : '')}}
+      {(mode === 'auto' || (mode === 'project' && !!data.length)) && <><Select aria-label="快照确认后继续" value={continueKind} disabled={busy} onChange={kind=>{setContinueKind(kind);setEntity(kind === 'student' ? context.student : kind === 'group' ? context.group : '')}}
         options={[{value:'',label:'只导入，暂不生成建议'},{value:'student',label:'快照确认后为指定学生生成建议'},{value:'group',label:'快照确认后为指定班级生成建议'}]} />
         {continueKind && <Input aria-label="学生或班级编号" value={entity} onChange={e=>setEntity(e.target.value)} placeholder={continueKind === 'student' ? '学生编号' : '班级编号'} />}</>}
       {mode === 'reference' ? <Button type="primary" disabled={busy || !references.length} onClick={()=>{useReferences(references);close()}}>添加到本轮</Button>
-        : <Button type="primary" disabled={busy || (!data.length && !material.length) || (!!data.length && !!continueKind && !entity.trim())} onClick={()=>void submit()}>确认分组并提交已识别文件</Button>}
+        : mode === 'project' && <Button type="primary" disabled={busy || (!data.length && !material.length) || (!!data.length && !!continueKind && !entity.trim())} onClick={()=>void submit()}>确认分组并提交已识别文件</Button>}
       {mode === 'project' && rows.some(r=>r.info.classification === 'unknown') && <Button disabled={busy} onClick={()=>{close();openImport()}}>去数据导入页手动处理表头</Button>}
       {dataRun && <Button disabled={busy} onClick={()=>{close();openRun(dataRun)}}>查看已提交的清洗任务</Button>}
     </Space>

@@ -47,7 +47,7 @@ def api_key(conn=None):
     return provider_key(active_provider(conn))
 
 
-def configured_model(session):
+def configured_model(session, *, max_tokens=3000):
     from smolagents import OpenAIServerModel
 
     provider = active_provider()
@@ -63,7 +63,7 @@ def configured_model(session):
                        "timeout": httpx.Timeout(60, connect=8), "max_retries": 0,
                        "http_client": httpx.Client(transport=ModelTransport(
                            provider, config["model"], session, stage="agent", base_url=config["base_url"]))},
-        max_tokens=3000,
+        max_tokens=max_tokens,
         **({"extra_body": {"thinking": {"type": "disabled"}}} if provider == "deepseek" else {}),
     )
 

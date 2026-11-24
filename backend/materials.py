@@ -2,17 +2,23 @@ import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import docx
-import pypdf
 import pypdfium2 as pdfium
 
 from .store import ROOT, new_id
 
 
-def process(document):
+def ocr_executable():
+    return Path(os.getenv("OCR_PYTHON") or ".venv-ocr/Scripts/python.exe").expanduser().resolve()
+
+
+def process(document, metrics=None):
+    if metrics is None:
+        metrics = {}
+    metrics.update(text_pages=0, ocr_units=0)
+
     path = Path(document["path"])
     suffix = path.suffix.lower()
     blocks = []
@@ -26,7 +32,9 @@ def process(document):
             blocks.append({"id": new_id(), "text": section, "locator": locator, "bbox": bbox})
 
     def ocr(image, locator):
-        executable = os.getenv("OCR_PYTHON", str(Path(".venv-ocr/Scripts/python.exe").resolve()))
+        executable = ocr_executable()
+        if not executable.is_file():
+            raise RuntimeError(f"{locator} 需要 OCR，但本机未配置 PaddleOCR。请先安装 OCR 环境，或上传含文字层的 PDF。")
         corrected = directory / f"{image.stem}-corrected.png"
         completed = subprocess.run([executable, "-m", "ocr_worker", str(image), str(corrected)], capture_output=True,
                                    encoding="utf-8", errors="replace", timeout=300,
@@ -37,6 +45,8 @@ def process(document):
         if corrected.exists():
             locator += " · 矫正图"
             previews[locator] = str(corrected)
+        metrics["ocr_engine"] = "PaddleOCR"
+        metrics["ocr_units"] += 1
         for region in result["blocks"]:
             add(region["text"], locator, region.get("bbox") if corrected.exists() else None)
 
@@ -47,23 +57,32 @@ def process(document):
         path = directory / (path.stem + ".docx")
         suffix = ".docx"
     if suffix == ".pdf":
-        source = pypdf.PdfReader(path)
-        image_pdf = pdfium.PdfDocument(path)
-        try:
-            for index, page in enumerate(source.pages):
-                locator = f"PDF 第 {index + 1} 页"
-                image = directory / f"{index + 1}.jpg"
-                image_pdf[index].render(scale=1.6).to_pil().convert("RGB").save(image)
-                previews[locator] = str(image)
-                text = page.extract_text() or ""
-                compact = re.sub(r"\s", "", text)
-                if "\ufffd" not in text and (len(compact) >= 35 or (compact and not page.images)):
-                    for paragraph in re.split(r"\n\s*\n", text):
-                        add(paragraph, locator)
-                elif compact or page.images or page.get_contents() is not None:
-                    ocr(image, locator)
-        finally:
-            image_pdf.close()
+        with pdfium.PdfDocument(path) as pdf:
+            for index, page in enumerate(pdf):
+                try:
+                    locator = f"PDF 第 {index + 1} 页"
+                    image = directory / f"{index + 1}.jpg"
+                    bitmap = page.render(scale=1.6)
+                    try:
+                        bitmap.to_pil().convert("RGB").save(image)
+                    finally:
+                        bitmap.close()
+                    previews[locator] = str(image)
+                    text_page = page.get_textpage()
+                    try:
+                        text = text_page.get_text_bounded()
+                    finally:
+                        text_page.close()
+                    compact = re.sub(r"\s", "", text)
+                    has_image = any(page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_IMAGE]))
+                    if "\ufffd" not in text and (len(compact) >= 35 or (compact and not has_image)):
+                        for paragraph in re.split(r"\n\s*\n", text):
+                            add(paragraph, locator)
+                        metrics["text_pages"] += 1
+                    elif compact or any(page.get_objects()):
+                        ocr(image, locator)
+                finally:
+                    page.close()
     elif suffix == ".docx":
         source = docx.Document(path)
         heading = ""

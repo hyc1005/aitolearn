@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 
 from .agent import api_key
+from .attachment_flow import plan_attachment_tools
+from .materials import ocr_executable
 from .attachments import MATERIALS, archive_is_small, excerpt, material_signature
 from .chat_agent import run_chat
 from .cleaning_agent import structured_review
@@ -92,7 +94,7 @@ async def read_upload(file):
 @app.get("/api/health")
 def health():
     return {"status": "ready", "model_configured": bool(api_key()),
-            "ocr_configured": Path(".venv-ocr/Scripts/python.exe").exists()}
+            "ocr_configured": ocr_executable().is_file()}
 
 
 class ModelSettings(BaseModel):
@@ -597,7 +599,7 @@ def retry(key: str):
 def retry_run(conn, item):
     if item["state"] not in {"failed", "stopped"}:
         raise HTTPException(409, "仅失败或已停止的任务可以恢复")
-    if item["kind"] not in {"clean", "generate", "recommendation_review"}:
+    if item["kind"] not in {"clean", "generate", "recommendation_review", "extract"}:
         return job(conn, item["kind"], item["payload"])
     item["state"] = "queued"
     item.pop("archived", None)
@@ -677,6 +679,96 @@ async def inspect_attachment(file: UploadFile = File(...), reference: bool = For
     return {"name": name, "classification": "unknown", "reason": "未识别到有效的业务表或教材格式，不会提交"}
 
 
+@app.post("/api/chat/attachments/submit")
+async def submit_chat_attachments(files: list[UploadFile] = File(...),
+                                  batch_id: str = Form(..., pattern=r"^[a-f0-9-]{36}$"),
+                                  session_id: str = Form("", max_length=100),
+                                  continue_target: str = Form("", max_length=180)):
+    if not 1 <= len(files) <= 20:
+        raise HTTPException(422, "请选择 1–20 个文件")
+    continuation = parse_continuation(continue_target)
+    with db() as conn:
+        if prior := get(conn, "attachment_receipt", batch_id):
+            return prior
+        session = require(conn, "chat_session", session_id) if session_id else None
+        try:
+            provider = chat_selection(conn, ChatRequest(question="处理上传文件"), session) or active_provider(conn)
+        except HTTPException as error:
+            if error.status_code != 422:
+                raise
+            provider = active_provider(conn)
+    tables_for_import, documents, skipped, seen = [], [], [], set()
+    size = 0
+    for file in files:
+        name = Path(file.filename or "").name[:180]
+        suffix = Path(name).suffix.lower()
+        if name in seen:
+            raise HTTPException(422, "同一批文件不可重名")
+        seen.add(name)
+        raw = await read_upload(file)
+        size += len(raw)
+        if size > 100_000_000:
+            raise HTTPException(422, "单批附件不能超过 100 MB")
+        if suffix in {".csv", ".xlsx"}:
+            [entry] = await inspect_import([UploadFile(io.BytesIO(raw), filename=name)], "{}")
+            info, _, rows = entry
+            if rows and info["status"] == "ready":
+                tables_for_import.append(entry)
+            else:
+                skipped.append({"name": name, "reason": info["message"] or "没有可导入的业务数据"})
+        else:
+            try:
+                recognized = suffix in MATERIALS and material_signature(suffix, raw)
+            except (BadZipFile, ValueError, OSError):
+                recognized = False
+            if recognized:
+                documents.append((name, raw))
+            else:
+                skipped.append({"name": name, "reason": "未识别格式，不会导入"})
+    counts = {"queue_student_import": len(tables_for_import), "queue_material_extract": len(documents)}
+    started = time.monotonic()
+    plan = await run_in_threadpool(plan_attachment_tools, provider, batch_id, counts) if any(counts.values()) else []
+    paths, cards, trace = [], [], []
+    try:
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if prior := get(conn, "attachment_receipt", batch_id):
+                return prior
+            for tool, origin in plan:
+                if tool == "queue_student_import":
+                    run, _ = queue_inspected_import(conn, tables_for_import, {}, continuation, paths)
+                    card, _ = cleaning_card(conn, run)
+                    cards.append(card)
+                elif tool == "queue_material_extract":
+                    for name, raw in documents:
+                        path = save_file(raw, Path(name).suffix.lower())
+                        paths.append(path)
+                        extract = queue_material(conn, name, path)
+                        cards.append({"kind": "material_extract", "run_id": extract["id"], "material_id": extract["payload"]["material"],
+                                      "name": name, "state": "queued"})
+                trace.append({"tool": tool, "status": "ok", "count": counts[tool], "origin": origin})
+            if skipped:
+                cards.append({"kind": "attachment_skipped", "files": skipped})
+            ctx = (session or {}).get("context", {})
+            answer = {"answer": "附件已进入后台处理；需要确认或校对时会在任务卡中显示。" if plan else "没有可以自动处理的文件。",
+                      "cards": cards, "trace": trace, "parts": [], "snapshot_id": ctx.get("snapshot_id", ""),
+                      "elapsed_ms": round((time.monotonic() - started) * 1000) if plan else None}
+            request = ChatRequest(question=("上传附件：" + "、".join(seen_in_order(files)))[:1200],
+                                  **{key: ctx.get(key, "") for key in ("student", "group", "node")})
+            saved = save_session(conn, session_id or None, request, answer)
+            result = {**answer, "question": request.question, "session_id": saved["id"]}
+            put(conn, "attachment_receipt", batch_id, result)
+            return result
+    except BaseException:
+        for path in paths:
+            Path(path).unlink(missing_ok=True)
+        raise
+
+
+def seen_in_order(files):
+    return [Path(file.filename or "").name[:180] for file in files]
+
+
 @app.post("/api/imports/preview")
 async def preview_import(files: list[UploadFile] = File(...), mapping: str = Form("{}")):
     inspected = await inspect_import(files, mapping)
@@ -719,52 +811,61 @@ async def suggest_import_mapping(files: list[UploadFile] = File(...), mapping: s
 @app.post("/api/imports")
 async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}"),
                 chat_session_id: str | None = Form(None), continue_target: str = Form("", max_length=180)):
-    continuation = None
-    if continue_target:
-        kind, sep, entity = continue_target.partition(":")
-        if not sep or kind not in {"student", "group"} or not entity:
-            raise HTTPException(422, "请指定续跑建议的学生或班级")
-        continuation = {kind: entity}
-    rows, sources, pending, skipped = [], [], [], []
+    continuation = parse_continuation(continue_target)
+    inspected = await inspect_import(files, mapping)
+    paths = []
     try:
-        inspected = await inspect_import(files, mapping)
-        columns = json.loads(mapping)
-        for info, raw, parsed in inspected:
-            name = info["name"]
-            if info["status"] == "skipped":
-                skipped.append(name)
-                continue
-            if info["status"] == "error":
-                raise ValueError(f"{name}：{info['message']}")
-            file_id = new_id()
-            rows.extend({**row, "file_id": file_id} for row in parsed)
-            pending.append((file_id, name, raw))
-        if not rows:
-            raise ValueError("没有可导入的业务数据，请选择学生、课程、测验、题目和作答文件。")
-        for file_id, name, raw in pending:
-            sources.append({"id": file_id, "name": name, "hash": hashlib.sha256(raw).hexdigest(),
-                            "path": save_file(raw, Path(name).suffix.lower())})
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run, batch = queue_inspected_import(conn, inspected, json.loads(mapping), continuation, paths)
+            result = cleaning_run(run)
+            result["skipped"] = [info["name"] for info, _, _ in inspected if info["status"] == "skipped"]
+            if chat_session_id is not None:
+                existing = get(conn, "chat_session", chat_session_id) or {}
+                context = existing.get("context", {})
+                card, _ = cleaning_card(conn, run)
+                answer = {"answer": "文件已接收，正在启动本批清洗。", "cards": [card],
+                          "snapshot_id": context.get("snapshot_id", "")}
+                request = ChatRequest(question=("导入 " + batch["label"])[:1200],
+                                      **{key: context.get(key, "") for key in ("student", "group", "node")})
+                saved = save_session(conn, chat_session_id, request, answer)
+                result.update(session_id=saved["id"], card=card)
+            return result
     except (ValueError, OSError, csv.Error) as exc:
+        for path in paths:
+            Path(path).unlink(missing_ok=True)
         raise HTTPException(400, str(exc)) from exc
-    with db() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        batch = {"id": new_id(), "rows": rows, "sources": sources, "mapping": columns,
-                 "label": "、".join(source["name"] for source in sources), "confirmed": False,
-                 "continuation": continuation}
-        run = queue_cleaning(conn, batch)
-        result = cleaning_run(run)
-        result["skipped"] = skipped
-        if chat_session_id is not None:
-            existing = get(conn, "chat_session", chat_session_id) or {}
-            context = existing.get("context", {})
-            card, _ = cleaning_card(conn, run)
-            answer = {"answer": "文件已接收，正在启动本批清洗。", "cards": [card],
-                      "snapshot_id": context.get("snapshot_id", "")}
-            request = ChatRequest(question=("导入 " + batch["label"])[:1200],
-                                  **{key: context.get(key, "") for key in ("student", "group", "node")})
-            saved = save_session(conn, chat_session_id, request, answer)
-            result.update(session_id=saved["id"], card=card)
-        return result
+
+
+def parse_continuation(target):
+    if not target:
+        return None
+    kind, sep, entity = target.partition(":")
+    if not sep or kind not in {"student", "group"} or not entity.strip():
+        raise HTTPException(422, "请指定续跑建议的学生或班级")
+    return {kind: entity.strip()}
+
+
+def queue_inspected_import(conn, inspected, columns, continuation, paths):
+    rows, sources, pending = [], [], []
+    for info, raw, parsed in inspected:
+        name = info["name"]
+        if info["status"] == "skipped":
+            continue
+        if info["status"] == "error":
+            raise ValueError(f"{name}：{info['message']}")
+        file_id = new_id()
+        rows.extend({**row, "file_id": file_id} for row in parsed)
+        pending.append((file_id, name, raw))
+    if not rows:
+        raise ValueError("没有可导入的业务数据，请选择学生、课程、测验、题目和作答文件。")
+    for file_id, name, raw in pending:
+        path = save_file(raw, Path(name).suffix.lower())
+        paths.append(path)
+        sources.append({"id": file_id, "name": name, "hash": hashlib.sha256(raw).hexdigest(), "path": path})
+    batch = {"id": new_id(), "rows": rows, "sources": sources, "mapping": columns,
+             "label": "、".join(source["name"] for source in sources), "confirmed": False, "continuation": continuation}
+    return queue_cleaning(conn, batch), batch
 
 
 def cleaning_run(item):
@@ -991,7 +1092,13 @@ def distribution(indicator: str, group: str, node: str, snapshot_id: str):
 @app.get("/api/materials")
 def materials():
     with db() as conn:
-        return [{k: doc[k] for k in ("id", "name", "state")} for doc in all_of(conn, "material")]
+        return [material_summary(doc) for doc in all_of(conn, "material")]
+
+
+def material_summary(doc):
+    return {**{k: doc[k] for k in ("id", "name", "state")},
+            "source": doc.get("source", "upload" if doc.get("path") else "imported_question_bank"),
+            "extraction": doc.get("extraction"), "error": doc.get("error")}
 
 
 @app.post("/api/materials")
@@ -1002,10 +1109,14 @@ async def upload_material(file: UploadFile = File(...)):
         raise HTTPException(400, "请上传 PDF、Word 或照片")
     path = save_file(await read_upload(file), suffix)
     with db() as conn:
-        key = new_id()
-        put(conn, "material", key, {"id": key, "name": name, "state": "processing", "path": path,
-                                     "blocks": [], "previews": {}})
-        return job(conn, "extract", {"material": key})
+        return queue_material(conn, name, path)
+
+
+def queue_material(conn, name, path):
+    key = new_id()
+    put(conn, "material", key, {"id": key, "name": name, "state": "processing", "path": path,
+                                 "source": "upload", "blocks": [], "previews": {}})
+    return job(conn, "extract", {"material": key})
 
 
 @app.post("/api/materials/seed-text")
@@ -1022,7 +1133,7 @@ def seed_text():
         if not blocks:
             raise HTTPException(400, "请先导入题目与材料表")
         put(conn, "material", key, {"id": key, "name": "赛题题库与学习卡", "state": "review",
-                                     "blocks": blocks, "previews": {}})
+                                     "source": "imported_question_bank", "blocks": blocks, "previews": {}})
         return {"id": key}
 
 
@@ -1036,7 +1147,7 @@ def search_material(query: str):
 def material(key: str):
     with db() as conn:
         doc = require(conn, "material", key)
-        return {**{k: doc[k] for k in ("id", "name", "state")},
+        return {**material_summary(doc),
                 "locators": list(doc["previews"]),
                 "blocks": [{k: v for k, v in block.items() if k != "vector"} for block in doc["blocks"]]}
 

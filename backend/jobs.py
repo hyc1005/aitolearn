@@ -34,13 +34,18 @@ def run():
             if job["kind"] == "extract":
                 with db() as conn:
                     doc = get(conn, "material", job["payload"]["material"])
-                doc["blocks"], doc["previews"] = process(doc)
+                    doc["state"] = "processing"
+                    doc.pop("error", None)
+                    put(conn, "material", doc["id"], doc)
+                metrics = {}
+                doc["blocks"], doc["previews"] = process(doc, metrics)
+                doc["extraction"] = metrics
                 doc["state"] = "review"
                 for block in doc["blocks"]:
                     block.update(material=doc["id"], title=doc["name"])
                 with db() as conn:
                     put(conn, "material", doc["id"], doc)
-                job["result"] = {"material": doc["id"]}
+                job["result"] = {"material": doc["id"], "extraction": metrics}
             elif job["kind"] == "publish":
                 with db() as conn:
                     doc = get(conn, "material", job["payload"]["material"])
@@ -95,6 +100,10 @@ def run():
             job["model_retrying"] = False
         with db() as conn:
             put(conn, "job", job["id"], job)
+            if job["kind"] == "extract" and job["state"] == "failed":
+                failed_doc = get(conn, "material", job["payload"]["material"])
+                if failed_doc:
+                    put(conn, "material", failed_doc["id"], {**failed_doc, "state": "failed", "error": job["error"]})
 
 
 if __name__ == "__main__":
