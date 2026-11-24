@@ -28,6 +28,9 @@ def db():
 def put(conn, kind, key, data):
     conn.execute("INSERT INTO records VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
                  (kind, key, json.dumps(data, ensure_ascii=False)))
+    if kind == "material" and data.get("state") in {"published", "replaced"}:
+        from .search import record_publication
+        record_publication(conn, data)
 
 
 def get(conn, kind, key):

@@ -7,11 +7,23 @@ from .snapshots import RULE_VERSION, digest, run_data_cleaning, table_data
 from .store import db, get, put
 
 
+class JobStopped(Exception):
+    pass
+
+
 def checkpoint(job, stage, result=None):
-    job["stage"] = stage
-    if result is not None:
-        job.setdefault("stages", {})[stage] = {**result, "recorded_at": time.time(), "run_id": job["id"]}
     with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if result is None and get(conn, "job_stop", job["id"]):
+            raise JobStopped
+        job["stage"] = stage
+        timing = job.setdefault("stage_timings", {})
+        if result is None:
+            timing[stage] = {"started_at": time.time(), "attempt": timing.get(stage, {}).get("attempt", 0) + 1}
+        elif stage in timing:
+            timing[stage]["elapsed_ms"] = max(0, round((time.time() - timing[stage]["started_at"]) * 1000))
+        if result is not None:
+            job.setdefault("stages", {})[stage] = {**result, "recorded_at": time.time(), "run_id": job["id"]}
         put(conn, "job", job["id"], job)
 
 
@@ -56,21 +68,25 @@ def run_recommendation(job):
     if snapshot is None:
         raise ValueError("任务缺少已确认快照，请重新发起")
     tables = table_data(snapshot)
-    checkpoint(job, "snapshot", {"snapshot_id": snapshot["id"], "material_ids": payload["material_ids"]})
-    checkpoint(job, "interpret")
+    if "snapshot" not in job["stages"]:
+        checkpoint(job, "snapshot", {"snapshot_id": snapshot["id"], "material_ids": payload["material_ids"]})
     if "interpret" not in job["stages"]:
+        checkpoint(job, "interpret")
         checkpoint(job, "interpret", interpret(tables, payload, job["id"]))
-    checkpoint(job, "generate")
     with db() as conn:
         draft = get(conn, "draft", job["id"])
     if draft is None:
+        checkpoint(job, "generate")
         result = generate(tables, payload, job["id"], job["stages"]["interpret"])
         draft = {**result, **payload, "id": job["id"], "run_id": job["id"], "message": result["follow_up"],
                  "approved": False, "revision": 1, "review_state": "pending"}
         with db() as conn:
             put(conn, "draft", draft["id"], draft)
             put(conn, "draft_revision", f'{draft["id"]}:1', draft)
-    checkpoint(job, "generate", {"model": draft["model"], "trace": draft["trace"], "draft_id": draft["id"]})
+    if "generate" not in job["stages"]:
+        checkpoint(job, "generate", {"model": draft["model"], "trace": draft["trace"], "draft_id": draft["id"],
+                                     "draft_mode": draft.get("draft_mode"), "material_gap": draft.get("material_gap"),
+                                     "variant_omission_reason": draft.get("variant_omission_reason")})
     review_recommendation(job, draft["id"], 1)
 
 

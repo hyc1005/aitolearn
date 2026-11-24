@@ -1,34 +1,51 @@
+import { FollowUpEditor, StudentFollowUps } from './FollowUp'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Menu, Select, Space, Statistic, Table, Tag, Typography, theme } from 'antd'
-import { ApartmentOutlined, BookOutlined, CloudUploadOutlined, DashboardOutlined, RadarChartOutlined, SendOutlined, SettingOutlined } from '@ant-design/icons'
+import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Select, Skeleton, Space, Steps, Table, Tag, Tooltip, Typography, theme } from 'antd'
+import { BookOutlined } from '@ant-design/icons'
+import { NavIcon } from './NavIcon'
 import zhCN from 'antd/locale/zh_CN'
-import AgentWorkbench, { ReviewPanel, runNames } from './AgentWorkbench'
+import AgentWorkbench, { ReviewPanel } from './AgentWorkbench'
 import { CaseReplay, type CaseData } from './CaseReplay'
 import { CleaningCounts, issueFilters } from './CleaningCounts'
-import * as echarts from 'echarts/core'
-import { HeatmapChart, RadarChart } from 'echarts/charts'
-import { GridComponent, RadarComponent, TooltipComponent, VisualMapComponent } from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
+import { ActiveStatus } from './ActiveStatus'
+import { Diagnostics, type DiagnosticSelection, type DiagnosticAxis, type Profile } from './Diagnostics'
+import { AnswerEvidence } from './AnswerEvidence'
+import { applyWorkbenchPalette, chartComparisonColor, workbenchTheme } from './workbenchTheme'
+import { LearningChat } from './LearningChat'
+import { MaterialUpload } from './MaterialUpload'
+import { ModelAccessPage, type ModelAccess } from './ModelAccess'
 import './style.css'
 
-echarts.use([HeatmapChart, RadarChart, GridComponent, RadarComponent, TooltipComponent, VisualMapComponent, CanvasRenderer])
 const { Title, Text, Paragraph } = Typography
 type Row = Record<string, any>
 type Axis = { id: string; label: string; score: number | null; n: number; coverage: number; population: number; status: string; earned: number; possible: number; distribution: number[] }
-const noGroups: Row[] = []
 const noAxes: Axis[] = []
 const pages = [
-  ['overview', '班级概览', <DashboardOutlined />], ['agent', 'Agent 工作台', <ApartmentOutlined />],
-  ['import', '导入与清洗', <CloudUploadOutlined />],
-  ['materials', '课程与资料', <BookOutlined />], ['student', '学生画像', <RadarChartOutlined />],
-  ['drafts', '学习建议', <SendOutlined />], ['settings', '任务与设置', <SettingOutlined />],
+  ['chat', '学情对话'], ['import', '数据导入'], ['materials', '课程与资料'], ['overview', '班级诊断'],
+  ['student', '画像'], ['drafts', '学习建议'], ['tasks', '任务中心'], ['settings', '设置'],
 ] as const
+const pageKeys = new Set<string>(pages.map(([key]) => key))
+type ProfileTarget = { kind: 'student' | 'group'; id: string }
+const mobileSidebarQuery = '(max-width: 800px)'
+const sidebarPreference = 'aitolearn.sidebar.collapsed.v2'
+function summaryLine(value?: string) {
+  const line = value?.split(/[。！？\n]/)[0]?.trim() || ''
+  return line.length > 90 ? line.slice(0, 90) + '…' : line
+}
+
+function pageFromHash() {
+  if (location.hash.startsWith('#agent')) return location.hash.includes('/') ? 'run' : 'tasks'
+  if (location.hash === '#models') return 'settings'
+  const key = location.hash.replace(/^#/, '').split('/')[0]
+  return pageKeys.has(key) ? key : 'chat'
+}
 async function api<T = any>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch('/api' + path, options)
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(typeof body.detail === 'string' ? body.detail : '操作失败，请检查输入或服务状态')
+    throw Object.assign(new Error(typeof body.detail === 'string' ? body.detail
+      : body.detail ? JSON.stringify(body.detail) : '操作失败，请检查输入或服务状态'), { status: response.status })
   }
   return response.json()
 }
@@ -37,86 +54,56 @@ const post = { method: 'POST' }
 const param = encodeURIComponent
 function query(values: Record<string, string>) { return '?' + new URLSearchParams(values).toString() }
 
-function ChartFrame({ kind, axes, groups = noGroups, compare, onSelect }: {
-  kind: 'heatmap' | 'radar'; axes: Axis[]; groups?: Row[]; compare?: Axis[]; onSelect: (a: Axis, group?: string) => void
+function ProfileRadar({ axes, compare, label, onSelect }: {
+  axes: Axis[]; compare: Axis[]; label: string; onSelect: (axis: Axis) => void
 }) {
-  const { token } = theme.useToken()
-  const ref = useRef<HTMLDivElement>(null)
-  const instance = useRef<ReturnType<typeof echarts.init>>(null)
-  const latest = useRef({ kind, axes, groups, onSelect })
-  useLayoutEffect(() => { latest.current = { kind, axes, groups, onSelect } })
-  useEffect(() => {
-    if (!ref.current) return
-    const chart = echarts.init(ref.current)
-    instance.current = chart
-    chart.on('click', (event: any) => {
-      const { kind, axes, groups, onSelect } = latest.current
-      if (kind === 'heatmap') {
-        if (!Array.isArray(event.value)) return
-        const [x, y] = event.value
-        const group = groups[y]
-        const axis = group?.axes.find((item: Axis) => item.id === axes[x]?.id)
-        if (axis) onSelect(axis, group.group)
-      } else {
-        const axis = axes.find(item => item.label === event.name)
-        if (axis) onSelect(axis)
-      }
-    })
-    const observer = new ResizeObserver(() => chart.resize())
-    observer.observe(ref.current)
-    return () => { observer.disconnect(); chart.dispose(); instance.current = null }
-  }, [])
-  useEffect(() => {
-    const chart = instance.current
-    if (!chart) return
-    if (kind === 'heatmap') {
-      chart.setOption({ animation: false, textStyle: { color: token.colorText, fontFamily: token.fontFamily },
-        grid: { top: 18, left: 60, right: 15, bottom: 62 },
-        xAxis: { type: 'category', data: axes.map(a => a.id), axisLabel: { interval: 0 } },
-        yAxis: { type: 'category', data: groups.map(g => g.group) },
-        tooltip: { formatter: (p: any) => {
-          const [x, y] = p.value
-          const a = groups[y].axes.find((item: Axis) => item.id === axes[x].id)
-          return axes[x].id + ' · ' + (a ? a.status + '<br>覆盖 ' + a.coverage + '/' + a.population + ' 人' : '无数据')
-        } },
-        visualMap: { orient: 'horizontal', left: 'center', bottom: 0, min: 0, max: 100, text: ['100%', '0%'], inRange: { color: ['#fff2d2', '#a9ded3', token.colorPrimary] } },
-        series: [{ type: 'heatmap', label: { show: true, color: '#162e2a', formatter: (p: any) => p.value[2] < 0 ? '—' : p.value[2] + '%' },
-          itemStyle: { borderWidth: 4, borderColor: token.colorBgContainer, borderRadius: 8 },
-          data: groups.flatMap((g, y) => {
-            const byId = new Map<string, Axis>(g.axes.map((axis: Axis) => [axis.id, axis]))
-            return axes.map((axis, x) => {
-              const item = byId.get(axis.id)
-              if (item?.score == null) return { value: [x, y, -1], itemStyle: { color: token.colorFillSecondary } }
-              return item.coverage * 2 < item.population
-                ? { value: [x, y, item.score], label: { formatter: item.score + '%*' } }
-                : [x, y, item.score]
-            })
-          }) }] }, { notMerge: true })
-    } else {
-      const complete = axes.every(a => a.score !== null)
-      chart.setOption({ animation: !matchMedia('(prefers-reduced-motion: reduce)').matches, tooltip: {}, radar: { indicator: axes.map(a => ({ name: a.label, max: 100 })),
-        radius: '60%', triggerEvent: true, axisName: { color: token.colorTextSecondary, width: 100, overflow: 'break' },
-        splitArea: { areaStyle: { color: ['#f4f9f7', '#fff'] } } },
-        series: [{ type: 'radar', lineStyle: { width: complete ? 2 : 0 }, symbolSize: 8,
-          data: [{ name: '学生', value: axes.map(a => a.score ?? NaN), itemStyle: { color: token.colorPrimary },
-            areaStyle: { opacity: complete ? 0.18 : 0 } },
-            ...(compare?.every(a => a.score !== null) ? [{ name: '班级参照', value: compare.map(a => a.score),
-              itemStyle: { color: '#be8552' }, lineStyle: { width: 1, type: 'dashed' } }] : [])] }] })
-    }
-  }, [axes, groups, compare, kind, token])
-  return <div className={'chart ' + kind} ref={ref} role="img" aria-label={kind === 'radar' ? '学生学习表现雷达图' : '班级指标热力图'} />
+  const map = new Map(compare.map(a => [a.id, a.score]))
+  const hasClass = axes.some(a => map.get(a.id) != null)
+  const point = (index: number, score: number) => {
+    const angle = index * 2 * Math.PI / axes.length - Math.PI / 2
+    return [180 + Math.cos(angle) * 104 * score / 100, 150 + Math.sin(angle) * 104 * score / 100]
+  }
+  const render = (scores: (number | null | undefined)[], dashed: boolean) => {
+    const color = dashed ? chartComparisonColor : 'var(--accent)'
+    const coords = scores.map((score, i) => score == null ? null : point(i, score))
+    return <g stroke={color} strokeWidth={dashed ? 2.5 : 2} strokeDasharray={dashed ? '6 4' : undefined}>
+      {coords.every(Boolean) ? <polygon points={coords.map(p => p!.join(',')).join(' ')} fill={dashed ? 'none' : color} fillOpacity={.12} />
+        : coords.map((p, i) => { const next = coords[(i + 1) % coords.length]; return p && next &&
+          <line key={i} x1={p[0]} y1={p[1]} x2={next[0]} y2={next[1]} /> })}
+      {coords.map((p, i) => p && <circle key={i} cx={p[0]} cy={p[1]} r={dashed ? 5 : 3} strokeDasharray="none" fill={dashed ? 'none' : color}>
+        <title>{axes[i].label} · {dashed ? '班级参照' : label} {scores[i]}%</title>
+      </circle>)}
+    </g>
+  }
+  return <section className="student-radar" aria-label="整体轮廓"><Title level={5}>整体轮廓</Title>
+    <Space wrap className="radar-legend"><span>{label}实线</span>{hasClass && <span className="radar-class">班级参照虚线</span>}</Space>
+    {axes.length >= 3 && axes.length <= 8 && <svg className="profile-radar-svg" viewBox="0 0 360 300" role="img" aria-label={label + '学习表现雷达图'}>
+      {[25, 50, 75, 100].map(scale => <polygon key={scale} points={axes.map((_, i) => point(i, scale).join(',')).join(' ')} fill="none" stroke="var(--line)" />)}
+      {axes.map((axis, i) => { const [x, y] = point(i, 100), [tx, ty] = point(i, 120); return <g key={axis.id}>
+        <line x1={180} y1={150} x2={x} y2={y} stroke="var(--line)" />
+        <text x={tx} y={ty} textAnchor="middle" fill="currentColor" fontSize="12">{axis.id}</text>
+      </g> })}
+      {render(axes.map(a => a.score), false)}{hasClass && render(axes.map(a => map.get(a.id)), true)}
+    </svg>}
+    <div className="radar-values">{axes.map(a => <div key={a.id}>
+      <Button type="link" onClick={() => onSelect(a)}>{a.id} · {a.label}</Button>
+      <span>{a.score == null ? '无有效评分' : a.score + '%'}{hasClass && ' / 班级 ' + (map.get(a.id) == null ? '无有效评分' : map.get(a.id) + '%')}</span>
+      {(axes.length < 3 || axes.length > 8) && a.score != null && <meter aria-label={a.label} min={0} max={100} value={a.score} />}
+    </div>)}</div>
+  </section>
 }
-function Comparison({ axes, compare }: { axes: Axis[]; compare: Axis[] }) {
+
+function Comparison({ axes, compare, select }: { axes: Axis[]; compare: Axis[]; select: (axis: Axis) => void }) {
   const byId = new Map(compare.map(axis => [axis.id, axis]))
   if (!axes.length) return null
-  return <section className="spaced" aria-label="学生与班级对照">
+  return <section className="student-comparison" aria-label="学生与班级对照">
     <Title level={5}>学生与班级对照</Title>
-    <Text type="secondary">青色圆点为学生，棕色方点为班级 · 0–100%</Text>
+    <Text type="secondary">实心圆为学生，空心菱形为班级 · 0–100%</Text>
     {axes.map(axis => {
       const other = byId.get(axis.id)
       const delta = axis.score == null || other?.score == null ? null : Number((axis.score - other.score).toFixed(1))
-      return <div key={axis.id} className="comparison-row">
-        <Text strong>{axis.label}</Text>
+      return <div key={axis.id} id={'indicator-' + axis.id} className="comparison-row">
+        <Button type="link" className="comparison-label" onClick={() => select(axis)}>{axis.label}</Button>
         <div className="dot-track" aria-hidden="true">
           {axis.score != null && <i style={{ left: axis.score + '%' }} />}
           {other?.score != null && <i className="class-dot" style={{ left: other.score + '%' }} />}
@@ -127,25 +114,12 @@ function Comparison({ axes, compare }: { axes: Axis[]; compare: Axis[] }) {
   </section>
 }
 
-function Distribution({ values }: { values: number[] }) {
-  const bins = [0, 20, 40, 60, 80].map(start => ({
-    label: start + (start === 80 ? '–100%' : '–<' + (start + 20) + '%'),
-    count: values.filter(value => value >= start && (start === 80 || value < start + 20)).length,
-  }))
-  return <section className="spaced" aria-label="学生得分率分布">
-    <Title level={5}>学生得分率分布 · {values.length} 人</Title>
-    {values.length === 0 ? <Text type="secondary">无有效评分</Text> : bins.map(bin =>
-      <div className="distribution-row" key={bin.label}>
-        <span>{bin.label}</span><meter min={0} max={values.length} value={bin.count} aria-label={bin.label} /><span>{bin.count} 人</span>
-      </div>)}
-  </section>
-}
-
 function SourcePage({ citation }: { citation: Row }) {
   const [size, setSize] = useState({ w: 0, h: 0 })
   const [original, setOriginal] = useState(false)
   const bbox: number[] | undefined = citation.bbox
   const locator = original ? citation.locator.replace(' · 矫正图', '') : citation.locator
+  if (!bbox && citation.title === '赛题题库与学习卡') return null
   return <>
     {citation.locator.endsWith(' · 矫正图') && <Button onClick={() => { setOriginal(!original); setSize({w:0,h:0}) }}>{original ? '查看矫正图' : '查看原图'}</Button>}
     <div className="source-preview">
@@ -160,37 +134,72 @@ function SourcePage({ citation }: { citation: Row }) {
 }
 function Workbench() {
   const { message } = App.useApp()
-  const [page, setPage] = useState(location.hash.startsWith('#agent') ? 'agent' : 'overview')
+  const [page, setPage] = useState<string>(pageFromHash)
+  const [mobile, setMobile] = useState(() => window.matchMedia(mobileSidebarQuery).matches)
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const [rail, setRail] = useState(() => {
+    try { return localStorage.getItem(sidebarPreference) === 'true' }
+    catch { return false }
+  })
+  const navToggle = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    const media = window.matchMedia(mobileSidebarQuery)
+    const resize = () => { setMobile(media.matches); setMobileOpen(false) }
+    media.addEventListener('change', resize)
+    return () => media.removeEventListener('change', resize)
+  }, [])
   const [runId, setRunId] = useState(() => /^#agent\/([a-f0-9]+)$/.exec(location.hash)?.[1] || '')
   const [runDetail, setRunDetail] = useState<Row>()
+  const [cleanDetail, setCleanDetail] = useState<Row>()
+  const [importPreview, setImportPreview] = useState<Row>()
+  const [previewBusy, setPreviewBusy] = useState(false)
   const [runError, setRunError] = useState('')
+  const [caseAvailable, setCaseAvailable] = useState(false)
   const [replay, setReplay] = useState<CaseData>()
   const [data, setData] = useState<Row>({})
-  const [student, setStudent] = useState('')
+  const [target, setTarget] = useState<ProfileTarget>()
+  const student = target?.kind === 'student' ? target.id : ''
+  const profileGroup = target?.kind === 'group' ? target.id : ''
   const [node, setNode] = useState('')
   const [topic, setTopic] = useState('')
   const [jobs, setJobs] = useState<Row[]>([])
+
+  const [followUpVersion, setFollowUpVersion] = useState(0)
   const [materials, setMaterials] = useState<Row[]>([])
   const [curriculum, setCurriculum] = useState<Row>({})
   const [drafts, setDrafts] = useState<Row[]>([])
   const [deliveries, setDeliveries] = useState<Row[]>([])
   const [health, setHealth] = useState<Row>({})
+  const [modelAccess, setModelAccess] = useState<ModelAccess>()
   const [report, setReport] = useState<Row>()
   const [files, setFiles] = useState<File[]>([])
+  const importInput = useRef<HTMLInputElement>(null)
   const [correction, setCorrection] = useState<Row>()
   const [corrected, setCorrected] = useState('{}')
   const [mapping, setMapping] = useState('{}')
+  const [mappingTiming, setMappingTiming] = useState<{start:number; end?:number}>()
+  const [suggestedMapping, setSuggestedMapping] = useState<{ source: string; files: File[]; values: Record<string, string> }>()
   const [selected, setSelected] = useState<Row>()
+  const [answerId, setAnswerId] = useState('')
+  const [profileSnapshot, setProfileSnapshot] = useState('')
+  const [focusIndicator, setFocusIndicator] = useState('')
   const [citation, setCitation] = useState<Row>()
+  const citationTrigger = useRef<HTMLElement | null>(null)
   const [doc, setDoc] = useState<Row>()
   const [changes, setChanges] = useState<Record<string, string>>({})
   const [lookup, setLookup] = useState('')
   const [hits, setHits] = useState<Row[]>([])
   const [draft, setDraft] = useState<Row>()
+  const [newAdvice, setNewAdvice] = useState<Row>()
+  const [bindingStudent, setBindingStudent] = useState('')
+  const [bindingLabel, setBindingLabel] = useState('')
   const [binding, setBinding] = useState({ label: '', webhook: '', secret: '' })
   const [preview, setPreview] = useState<Row>()
+  const practicePreview = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (preview) practicePreview.current?.scrollIntoView({ block: 'nearest' })
+  }, [preview])
   const [busy, setBusy] = useState(false)
-  const [classFilter, setClassFilter] = useState('')
   async function refresh() {
     const [r, library, map, list, delivery, status] = await Promise.all([
       api('/imports/report'), api('/materials'), api('/curriculum'), api('/recommendations'), api('/deliveries'), api('/health'),
@@ -198,19 +207,32 @@ function Workbench() {
     setReport(r); setMaterials(library); setCurriculum(map); setDrafts(list); setDeliveries(delivery); setHealth(status)
   }
   const goTo = (next: string) => {
-    if (next === 'agent') location.hash = 'agent'
-    else if (location.hash.startsWith('#agent')) history.replaceState(null, '', location.pathname + location.search)
+    if (next === 'run') return
+    const fromModels = location.hash === '#models'
+    history.replaceState(null, '', location.pathname + location.search + (next === 'chat' ? '' : '#' + next))
     setPage(next)
+    if (next === 'settings' && fromModels) {
+      requestAnimationFrame(() => document.getElementById('model-access')?.scrollIntoView({ block: 'start' }))
+    }
   }
   const openRun = (id: string) => {
-    location.hash = id ? 'agent/' + id : 'agent'
+    if (!id) { setRunId(''); goTo('tasks'); return }
+    location.hash = 'agent/' + id
     setRunId(id)
-    setPage('agent')
+    setPage('run')
   }
   async function perform(action: () => Promise<unknown>) {
     setBusy(true)
     try { await action() } catch (e) { message.error((e as Error).message) } finally { setBusy(false) }
   }
+  useEffect(() => {
+    if (location.hash === '#models') requestAnimationFrame(() => document.getElementById('model-access')?.scrollIntoView({ block: 'start' }))
+  }, [page])
+  useEffect(() => {
+    if (page === 'chat' || page === 'settings' || page === 'run') {
+      void api<ModelAccess>('/models/connections').then(setModelAccess).catch(error => message.error(error.message))
+    }
+  }, [page])
   useEffect(() => {
     void refresh().catch(e => message.error(e.message))
     let signature = ''
@@ -229,20 +251,24 @@ function Workbench() {
   useEffect(() => {
     const onHashChange = () => {
       setRunId(/^#agent\/([a-f0-9]+)$/.exec(location.hash)?.[1] || '')
-      setPage(location.hash.startsWith('#agent') ? 'agent' : 'overview')
+      setPage(pageFromHash())
     }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
   useEffect(() => {
-    if (!runId || page !== 'agent') return
+    if (!runId || page !== 'run') return
     let active = true
     const load = async () => {
       try {
         const detail = await api('/agent/runs/' + runId)
         if (active) { setRunDetail(detail); setRunError('') }
       } catch (error) {
-        if (active) setRunError((error as Error).message)
+        if (!active) return
+        if ((error as { status?: number }).status === 404) {
+          window.location.hash = ''
+          setPage('chat')
+        } else setRunError((error as Error).message)
       }
     }
     setRunError('')
@@ -250,50 +276,113 @@ function Workbench() {
     const timer = setInterval(load, 1800)
     return () => { active = false; clearInterval(timer) }
   }, [runId, page])
-  const evidenceRequest = useRef(0)
-  useLayoutEffect(() => { evidenceRequest.current++ }, [student, node, page, report?.snapshot_id])
+  const latestClean = useMemo(() => [...jobs].filter(job => job.kind === 'clean').sort((a, b) => b.created - a.created)[0], [jobs])
   useEffect(() => {
+    if (!latestClean || !['import', 'chat', 'settings'].includes(page)) return
     let active = true
-    void api('/profiles' + query({ student, node })).then(result => {
-      if (active) setData({ ...result, selectedStudent: student, selectedNode: node })
-    }).catch(error => { if (active) message.error(error.message) })
+    void api('/agent/runs/' + latestClean.id).then(detail => { if (active) setCleanDetail(detail) }).catch(() => {})
     return () => { active = false }
-  }, [student, node, report?.snapshot_id])
+  }, [latestClean?.id, latestClean?.state, latestClean?.stage, page])
+  useEffect(() => {
+    if (!['chat', 'settings', 'run', 'overview'].includes(page)) return
+    void api('/agent/cases/q015').then(result => {
+      setCaseAvailable(!!result?.snapshot_id && (result.steps || []).some((step: Row) =>
+        step.evidence || step.before || step.after || step.result))
+    }).catch(() => setCaseAvailable(false))
+  }, [page, report?.snapshot_id])
+  const evidenceRequest = useRef(0)
+  const profileRequestSnapshot = page === 'student' ? profileSnapshot : ''
+  const requestedStudent = page === 'student' ? student : ''
+  const requestedGroup = page === 'student' ? profileGroup : ''
+  const requestedNode = page === 'student' ? node : ''
+  const profileKey = JSON.stringify([requestedStudent, requestedGroup, requestedNode, profileRequestSnapshot || report?.snapshot_id || ''])
+  const [profileError, setProfileError] = useState('')
+  useLayoutEffect(() => { evidenceRequest.current++ }, [profileKey, page])
+  useEffect(() => {
+    const controller = new AbortController()
+    setProfileError('')
+    void api('/profiles' + query({ student: requestedStudent, group: requestedGroup, node: requestedNode,
+      snapshot_id: profileRequestSnapshot || report?.snapshot_id || '' }), { signal: controller.signal }).then(result => {
+      if (!controller.signal.aborted) setData({ ...result, profileKey })
+    }).catch(error => {
+      if (!controller.signal.aborted) { setProfileError(error.message); message.error(error.message) }
+    })
+    return () => controller.abort()
+  }, [profileKey, profileRequestSnapshot, report?.snapshot_id, requestedStudent, requestedGroup, requestedNode])
+  const profileReady = data.profileKey === profileKey
+  useEffect(() => {
+    if (page !== 'student' || !focusIndicator || !profileReady) return
+    const indicator = document.getElementById('indicator-' + focusIndicator)
+    indicator?.scrollIntoView({ block: 'nearest' })
+    indicator?.querySelector('button')?.focus({ preventScroll: true })
+    setFocusIndicator('')
+  }, [page, focusIndicator, profileReady])
   const cleaningAudit = report?.last_agent_review
   const groups: Row[] = data.groups || []
   const students: Row[] = data.students || []
   const currentClass = students.find(s => s.学生编号 === student)?.模拟班级编号
   const current: Row = data.profile || {}
   const axes: Axis[] = useMemo(() => topic
-    ? (current.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : current.topics || noAxes,
+    ? (current.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : current.axes || noAxes,
   [current.axes, current.topics, topic])
-  const comparison: Row = groups.find(g => g.group === currentClass) || {}
+  const comparison: Row = student && groups.find(g => g.group === currentClass) || {}
   const compare: Axis[] = useMemo(() => topic
-    ? (comparison.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : comparison.topics || noAxes,
+    ? (comparison.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : comparison.axes || noAxes,
   [comparison.axes, comparison.topics, topic])
-  const chooseEvidence = async (axis: Axis, group?: string) => {
-    if (!data.snapshot_id || data.selectedNode !== node || (!group && data.selectedStudent !== student)) return
-    if (report?.snapshot_id && report.snapshot_id !== data.snapshot_id) return
+  const readEvidence = async (target: DiagnosticSelection & { student: string; axis: DiagnosticAxis; include_unscored?: string }) => {
     const request = ++evidenceRequest.current
-    const target = { indicator: axis.id, student: group ? '' : student, group: group || '', node, snapshot_id: data.snapshot_id }
+    const { axis, ...params } = target
     try {
-      const rows = await api('/profiles/evidence' + query(target))
-      if (request === evidenceRequest.current) setSelected({ axis, rows, ...target })
+      const rows = await api('/profiles/evidence' + query(params))
+      if (request === evidenceRequest.current) {
+        setAnswerId(rows[0]?.作答事件编号 || '')
+        setSelected({ axis, rows, ...params })
+      }
     } catch (error) {
       if (request === evidenceRequest.current) message.error((error as Error).message)
     }
   }
+  const chooseEvidence = (axis: Axis) => {
+    if (!data.snapshot_id || !profileReady) return
+    void readEvidence({ axis, indicator: axis.id, student, group: profileGroup, node, snapshot_id: data.snapshot_id, include_unscored: 'true' })
+  }
+  const openReplay = () => perform(async () => setReplay(await api<CaseData>('/agent/cases/q015')))
+  const selectedAnswer: Row | undefined = selected?.rows.find((row: Row) => row.作答事件编号 === answerId)
+  const linkedDraft = selectedAnswer && drafts.find(d => d.snapshot_id === selected?.snapshot_id
+    && d.student === selectedAnswer.学生编号 && d.anchor_event === answerId && d.approved)
+    || (selectedAnswer && drafts.find(d => d.snapshot_id === selected?.snapshot_id && d.student === selectedAnswer.学生编号 && d.anchor_event === answerId))
+  const teachingSource = linkedDraft?.citations?.find((item: Row) => item.locator === selectedAnswer?.材料编号)
+    || linkedDraft?.citations?.find((item: Row) => String(item.locator).startsWith('L'))
   const importFiles = () => perform(async () => {
     const payload = new FormData()
     files.forEach(f => payload.append('files', f))
     payload.append('mapping', mapping)
     const result = await api('/imports', { ...post, body: payload })
-    openRun(result.run_id)
+    if (result.skipped?.length) message.info('已跳过字段说明：' + result.skipped.join('、'))
+    setFiles([])
+    setImportPreview(undefined)
+    await refresh()
   })
+  useEffect(() => {
+    let active = true
+    setImportPreview(undefined)
+    if (!files.length) return
+    const payload = new FormData()
+    files.forEach(file => payload.append('files', file))
+    payload.append('mapping', mapping)
+    setPreviewBusy(true)
+    void api('/imports/preview', { ...post, body: payload }).then(result => {
+      if (active) setImportPreview(result)
+    }).catch(error => {
+      if (active) setImportPreview({ files: [], can_import: false, error: error.message })
+    }).finally(() => { if (active) setPreviewBusy(false) })
+    return () => { active = false }
+  }, [files, mapping])
   const openDoc = (id: string) => perform(async () => { setDoc(await api('/materials/' + id)); setChanges({}) })
-  const launch = (target: Row) => perform(async () => {
+  const launch = (target: Row, onLaunched?: () => void) => perform(async () => {
     const result = await api('/agent/runs', json('POST', { node, snapshot_id: data.snapshot_id, ...target }))
     openRun(result.run_id)
+    onLaunched?.()
   })
   const openDraft = (d: Row) => {
     setDraft({ ...d, message: d.message ?? d.follow_up })
@@ -318,60 +407,155 @@ function Workbench() {
     if (saved.approved) setPreview(await api('/recommendations/' + saved.id + '/preview'))
     else if (saved.review_run_id) { setDraft(undefined); openRun(saved.review_run_id) }
   })
-  const nodeChoice = <Select aria-label="测验节点" value={node} style={{ width: 142 }} onChange={setNode}
+  const activeSnapshot = report?.snapshot_id || ''
+  const openProfile = (kind: ProfileTarget['kind'], id: string, node: string, snapshot: string, indicator: string) => {
+    setTarget({ kind, id }); setNode(node); setProfileSnapshot(snapshot); setTopic('')
+    setFocusIndicator(indicator); goTo('student')
+  }
+  const nodeChoice = <Select aria-label="测验节点" value={node} className="profile-node" onChange={value => { setNode(value); setFocusIndicator('') }}
     options={[{ value: '', label: '全部测验' }, ...(data.nodes || []).map((v: string) => ({ value: v, label: v }))]} />
-  const studentChoice = <Select aria-label="选择学生" placeholder="选择学生" value={student || undefined} style={{ width: 170 }}
-    showSearch onChange={v => { setStudent(v); setTopic('') }}
-    options={students.filter(s => !classFilter || s.模拟班级编号 === classFilter).map(s => ({ value: s.学生编号, label: s.学生编号 + ' · ' + s.模拟班级编号 }))} />
-  function axisTable(source: Axis[], group?: string) {
-    return <Table rowKey="id" size="small" pagination={false} dataSource={source} columns={[
-      { title: '指标', dataIndex: 'label', render: (_, a) => <Button type="link" onClick={() => chooseEvidence(a, group)}>{a.label}</Button> },
-      { title: '得分率', dataIndex: 'score', render: (v, a) => v === null ? a.status : v + '%' },
-      { title: '有效作答', dataIndex: 'n' }, { title: '覆盖', render: (_, a) => a.coverage + '/' + a.population },
-    ]} />
+  const profileChoices = [
+    { label: '班级', options: groups.map(g => ({ value: 'group:' + g.group, label: g.group + ' · 班级' })) },
+    { label: '学生', options: students.map(s => ({ value: 'student:' + s.学生编号, label: s.学生编号 + ' · ' + s.模拟班级编号 })) },
+  ]
+  const confirmClean = (detail: Row) => perform(async () => {
+    const result = await api('/imports/' + detail.payload.batch_id + '/confirm' + query({ run_id: detail.id }), post)
+    setRunDetail(await api('/agent/runs/' + detail.id))
+    await refresh()
+    message.success('已核对并启用这批数据')
+    if (result.recommendation_run_id) openRun(result.recommendation_run_id)
+    if (result.continuation_error) message.warning('未自动生成建议：' + result.continuation_error)
+  })
+  const navExpanded = mobile ? mobileOpen : !rail
+  const navAction = navExpanded ? '收起导航' : '展开导航'
+  const toggleNav = () => {
+    if (mobile) { setMobileOpen(!mobileOpen); return }
+    setRail(!rail)
+    try { localStorage.setItem(sidebarPreference, String(!rail)) } catch { /* The toggle still works for this visit. */ }
   }
   return <Layout className="shell">
-    <Layout.Sider width={234} theme="light" className="sidebar">
-      <div className="brand"><span className="brand-symbol"><ApartmentOutlined /></span><div>智慧学伴<small>教师工作台</small></div></div>
-      <Menu selectedKeys={[page]} mode="inline" items={pages.map(([key, label, icon]) => ({ key, label, icon }))} onClick={e => goTo(e.key)} />
+    <Layout.Sider width={!mobile && rail ? 72 : 216} className={'sidebar' + (!mobile && rail ? ' sidebar-rail' : '')}>
+      <div className="brand">
+        <span className="brand-symbol"><NavIcon name="agent" /></span>
+        <div className="brand-name" aria-label="智慧学伴">智慧学伴</div>
+        <Tooltip title={navAction} placement={mobile ? 'bottom' : 'right'}>
+          <button type="button" className="nav-toggle" ref={navToggle} aria-label={navAction} aria-controls="workbench-navigation"
+            aria-expanded={navExpanded} onClick={toggleNav}><NavIcon name="toggle" flipped={!navExpanded} /></button>
+        </Tooltip>
+      </div>
+      <nav id="workbench-navigation" aria-label="工作台导航" hidden={mobile && !mobileOpen}>
+        {pages.map(([key, label]) => <Tooltip key={key} title={!mobile && rail ? label : undefined} placement="right">
+          <button type="button" className="nav-item" aria-current={page === key ? 'page' : undefined} aria-label={label} onClick={() => {
+            goTo(key)
+            if (mobile) { setMobileOpen(false); navToggle.current?.focus() }
+          }}>
+            <NavIcon name={key === 'tasks' ? 'agent' : key} /><span>{label}</span>
+          </button>
+        </Tooltip>)}
+      </nav>
     </Layout.Sider>
     <Layout.Content className="content">
-      <header className="page-head"><Title level={2}>{pages.find(p => p[0] === page)?.[1]}</Title>
-        <Space><Button href="/api/export?format=json">导出 JSON</Button><Button href="/api/export?format=csv">导出 CSV</Button></Space></header>
-      {page === 'overview' && <>
-        <div className="hero"><Title level={3}>七年级数学学情</Title>
-          <Space wrap><Button onClick={() => goTo('import')}>导入学情</Button><Button type="primary" onClick={() => goTo('agent')}>打开 Agent 工作台</Button></Space></div>
-        <div className="metric-grid"><Card><Statistic title="学生" value={students.length} /></Card><Card><Statistic title="班级" value={groups.length} /></Card><Card><Statistic title="测验节点" value={data.nodes?.length || 0} /></Card><Card><Statistic title="有效作答" value={report?.valid_scored || 0} /></Card></div>
-        <Card title="班级指标对照" extra={nodeChoice}>
-          {groups[0]?.axes.length ? <><div className="heatmap-scroll"><ChartFrame kind="heatmap" axes={groups[0].axes} groups={groups} onSelect={chooseEvidence} /></div>
-            <Text type="secondary">— 无有效评分或无数据 · * 覆盖率低于 50%</Text>
-            <details><summary>查看得分率与覆盖口径</summary>得分率取各有效作答学生的得分率平均值。覆盖为有有效作答的人数／应覆盖人数。</details>
-          </> : <Empty description="导入逐题作答后即可查看班级画像" />}
-        </Card>
-        {groups.map(g => <Card key={g.group} title={g.group} extra={<Button disabled={!g.axes.length} onClick={() => launch({ group: g.group })}>生成班级建议</Button>}>{axisTable(g.axes, g.group)}</Card>)}
-      </>}
-      {page === 'agent' && <AgentWorkbench key={runId} jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
+      {page !== 'overview' && page !== 'chat' && <header className="page-head"><Title level={2}>{page === 'run' ? '任务详情' : pages.find(p => p[0] === page)?.[1]}</Title>
+        {page === 'run' && <Button onClick={() => openRun('')}>返回任务中心</Button>}</header>}
+      <Diagnostics active={page === 'overview'} data={data.groups && (!activeSnapshot || activeSnapshot === data.snapshot_id) ? data as Profile : undefined}
+        count={students.length} attempts={report?.valid_scored} busy={busy} api={api}
+        openImport={() => goTo('import')} openEvidence={target => void readEvidence(target)}
+        openStudent={(id, node, snapshot, indicator) => openProfile('student', id, node, snapshot, indicator)}
+        openGroup={(id, node, snapshot, indicator) => openProfile('group', id, node, snapshot, indicator)}
+        launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
+      <div hidden={page !== 'chat'}>
+        <LearningChat active={page === 'chat'} snapshot={activeSnapshot}
+          pendingRun={latestClean?.stage === 'confirm' && latestClean.state === 'done' ? latestClean.id : undefined}
+          openAdvice={target => setNewAdvice(target)}
+          students={(data.snapshot_id === activeSnapshot ? students : []) as Parameters<typeof LearningChat>[0]['students']}
+          groups={(data.snapshot_id === activeSnapshot ? groups : []).map(group => group.group)}
+          nodes={data.snapshot_id === activeSnapshot ? data.nodes : []} access={modelAccess} api={api}
+          openAccess={() => goTo('settings')} openCitation={(value, trigger) => { citationTrigger.current = trigger; setCitation(value) }} openImport={() => goTo('import')}
+          openMaterial={id => void openDoc(id)} openRun={openRun} openDraft={id => { const found = drafts.find(d => d.id === id); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
+          openProfile={(kind, id, node, indicator, snapshot) => openProfile(kind, id, node, snapshot || activeSnapshot, indicator)}
+          openPage={goTo}
+          onTaskStarted={() => { void refresh() }} />
+      </div>
+      {(page === 'run' || page === 'tasks') && <AgentWorkbench key={page === 'run' ? runId : 'tasks'} api={api} openSettings={() => goTo('settings')} openMaterials={() => goTo('materials')}
+        jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={page === 'run' ? runId : ''}
+        caseAvailable={caseAvailable}
         error={runError} loading={busy} legacy={!!report?.legacy_pending}
         open={openRun} openImport={() => goTo('import')}
-        openReplay={() => perform(async () => setReplay(await api<CaseData>('/agent/cases/q015')))}
+        openReplay={openReplay}
         openDraft={key => { const found = drafts.find(d => d.id === key); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
         migrate={() => perform(async () => { openRun((await api('/imports/migrate', post)).run_id) })}
-        retry={() => perform(async () => { setRunDetail(await api('/jobs/' + runId + '/retry', post)) })}
+        retry={() => perform(async () => { const result = await api('/jobs/' + runId + '/retry', post); if (result.id !== runId) openRun(result.id); else setRunDetail(result) })}
+        control={action => perform(async () => {
+          await api('/jobs/' + runId + '/control/' + action, post)
+          setRunDetail(await api('/agent/runs/' + runId))
+          await refresh()
+        })}
         rebase={() => perform(async () => { openRun((await api('/imports/' + runDetail?.payload.batch_id + '/rebase', post)).run_id) })}
-        confirm={() => perform(async () => {
-          await api('/imports/' + runDetail?.payload.batch_id + '/confirm' + query({ run_id: runId }), post)
-          setRunDetail(await api('/agent/runs/' + runId)); await refresh(); message.success('已启用快照')
-        })} />}
+        confirm={() => { if (runDetail) void confirmClean(runDetail) }} />}
       {page === 'import' && <>
-        <Card title="导入学情文件">
-          <Space wrap><Input type="file" multiple accept=".csv,.xlsx" onChange={e => setFiles(Array.from(e.target.files || []))} />
-            <Button type="primary" loading={busy} disabled={!files.length} onClick={importFiles}>运行 Agent 清洗</Button>
-          </Space>
-          <details className="spaced"><summary>自定义列映射</summary><Input.TextArea value={mapping} onChange={e => setMapping(e.target.value)} placeholder='{"学号":"学生编号"}' /></details>
-          <Paragraph type="secondary" className="spaced">可上传 XLSX 工作簿或成组 CSV，也支持名册和总分。</Paragraph>
+        <Card title="当前步骤" extra={latestClean && <Button onClick={() => openRun(latestClean.id)}>查看任务详情</Button>}>
+          <Steps current={latestClean?.state === 'failed' ? 1 : cleanDetail?.stage === 'confirm' && cleanDetail.state === 'done' ? 2 :
+            report?.snapshot_id ? 3 : latestClean ? 1 : 0} items={[
+            { title: '选择文件' }, { title: '清洗与模型复核' }, { title: '核对并确认' }, { title: '快照生效' }]} />
+          <div className="spaced">
+            {latestClean?.state === 'failed' ? <Alert type="error" title={'本批清洗失败：' + (latestClean.error || '请查看任务详情')}
+              action={<Button onClick={() => openRun(latestClean.id)}>查看并重试</Button>} />
+              : cleanDetail?.stage === 'confirm' && cleanDetail.state === 'done' ? <Alert type="warning" title="清洗复核已完成，等待教师核对"
+                description={<CleaningCounts report={cleanDetail.report as Parameters<typeof CleaningCounts>[0]['report']} />}
+                action={<Button type="primary" loading={busy} onClick={() => confirmClean(cleanDetail)}>核对并确认本批数据</Button>} />
+              : latestClean && ['queued', 'running'].includes(latestClean.state) ? <Alert type="info" title={latestClean.state === 'running'
+                ? <ActiveStatus label="本批数据正在清洗或复核" started={latestClean.stage_timings?.[latestClean.stage]?.started_at ? latestClean.stage_timings[latestClean.stage].started_at * 1000 : undefined} /> : '本批数据正在排队'}
+                description="可以查看真实计数、异常和复核状态。" action={<Button onClick={() => openRun(latestClean.id)}>查看本批进度</Button>} />
+              : report?.snapshot_id ? <Space wrap><Tag color="success">已确认快照</Tag>
+                <Button type="primary" onClick={() => goTo('chat')}>回到对话，问第一个问题</Button>
+                <Button onClick={() => goTo('materials')}>前往课程与资料</Button></Space>
+              : <Text type="secondary">选择 XLSX 工作簿，或一次选中配套 CSV 文件。</Text>}
+          </div>
         </Card>
-        {report?.legacy_pending && <Alert type="info" message="已有历史批次，需迁移为快照后启用"
-          action={<Button onClick={() => goTo('agent')}>打开 Agent 工作台</Button>} />}
+        <Card title="导入学情文件">
+          <input ref={importInput} type="file" hidden multiple accept=".csv,.xlsx" onChange={e => setFiles(Array.from(e.target.files || []))} />
+          <Space wrap><Button onClick={() => importInput.current?.click()}>选择文件</Button>
+            <Text>{files.length ? '已选 ' + files.length + ' 个文件' : '尚未选择文件'}</Text>
+            <Button type="primary" loading={busy} disabled={!files.length || previewBusy || !importPreview?.can_import} onClick={importFiles}>开始清洗</Button>
+          </Space>
+          {!!files.length && <ul>{files.map((file, index) => <li key={file.name + index}>
+            {file.name} <Button type="link" onClick={() => setFiles(current => current.filter((_, i) => i !== index))}>移除</Button>
+          </li>)}</ul>}
+          {previewBusy && <Text>正在识别文件…</Text>}
+          {importPreview?.error && <Alert type="error" title={importPreview.error} />}
+          {importPreview?.files?.map((file: Row, index: number) => <div key={file.name + index}>
+            <Text type={file.status === 'error' ? 'danger' : 'secondary'}>
+              {file.name} · {file.message || Object.entries(file.tables).map(([name, count]) => name + ' ' + count + ' 行').join('、')}
+            </Text>
+          </div>)}
+          {files.length > 0 && importPreview && !importPreview.can_import && !importPreview.error &&
+            !importPreview.files.some((file: Row) => file.status === 'error') &&
+            <Alert type="warning" title="没有可导入的业务数据，请选择学情文件。" />}
+          {importPreview?.files?.some((file: Row) => file.status === 'error' && /^(缺少必需列|未识别到)/.test(file.message)) &&
+            <Button loading={busy} onClick={() => perform(async () => {
+              const payload = new FormData()
+              for (const file of files) payload.append('files', file)
+              payload.append('mapping', mapping)
+              const start = Date.now()
+              setMappingTiming({start})
+              const result = await api('/imports/suggest-mapping', { method: 'POST', body: payload })
+                .finally(() => setMappingTiming({start, end:Date.now()}))
+              if (!Object.keys(result.mapping).length) message.info('没有找到明确的列映射，请手动填写')
+              setSuggestedMapping({ source: mapping, files, values: result.mapping })
+            })}>建议列映射</Button>}
+          {mappingTiming && (mappingTiming.end ? <small>列映射检查耗时 {((mappingTiming.end - mappingTiming.start) / 1000).toFixed(1)} 秒</small> : <ActiveStatus started={mappingTiming.start} label="等待列映射建议" />)}
+          {suggestedMapping?.source === mapping && suggestedMapping.files === files && !!Object.keys(suggestedMapping.values).length &&
+            <Alert className="spaced" type="info" title="请核对建议列映射"
+              description={Object.entries(suggestedMapping.values).map(([from, to]) => from + ' → ' + to).join('、')}
+              action={<Button onClick={() => {
+                setMapping(JSON.stringify({ ...JSON.parse(mapping), ...suggestedMapping.values }))
+                setSuggestedMapping(undefined)
+              }}>应用并重新预检</Button>} />}
+          <details className="spaced"><summary>自定义列映射</summary><Input.TextArea value={mapping} onChange={e => setMapping(e.target.value)} placeholder='{"学号":"学生编号"}' /></details>
+          <Paragraph type="secondary" className="spaced">可上传 XLSX 工作簿或成组 CSV，也支持名册和总分。缺少文件时，清洗报告会列出无法关联的原始行。</Paragraph>
+        </Card>
+        {report?.legacy_pending && <Alert type="info" title="已有历史批次，需迁移为快照后启用"
+          action={<Button onClick={() => goTo('tasks')}>打开任务记录</Button>} />}
         {report && <Card title="清洗计数"><CleaningCounts report={report as Parameters<typeof CleaningCounts>[0]['report']} /></Card>}
         {cleaningAudit?.trace?.length > 0 && <Card title="Agent 清洗记录">
           <ReviewPanel review={cleaningAudit} collapseDetails={cleaningAudit.decision === 'ready'} />
@@ -393,48 +577,108 @@ function Workbench() {
                 const matches = await api('/materials/search' + query({query:q.材料编号}))
                 const source = matches.find((m: Row) => m.locator === q.材料编号)
                 if (source) setCitation(source)
-                else message.info(q.题干或内容 || q.来源或资料文件 || '请先发布题库')
+                else message.info(q.题干或内容 || (q.来源或资料文件 ? '原表来源（仅索引）：' + q.来源或资料文件 : '请先发布题库'))
               })}>{q.材料编号}</Button>)}
           </Space> }}
-          columns={['主题', '观察指标', '课标整理编号', '课标文件页／正文页', '教材正文页'].map(k => ({ title: k, dataIndex: k }))} /></Card>
-        <Card title="教学资料" extra={<Button onClick={() => perform(async () => { const r = await api('/materials/seed-text', post); await refresh(); await openDoc(r.id) })}>整理已导入题库</Button>}>
-          <Input type="file" accept=".pdf,.doc,.docx,.png,.jpeg,.jpg,.webp" onChange={e => { const file = e.target.files?.[0]; if (file) void perform(async () => {
-            const body = new FormData(); body.append('file', file); await api('/materials', { ...post, body }); await refresh()
-          }) }} />
-          <div className="books">{materials.map(d => <button key={d.id} className="book" onClick={() => openDoc(d.id)}><BookOutlined /> <strong>{d.name}</strong><small>{({ processing: '解析中', review: '待校对', indexing: '建索引中', published: '已发布', replaced: '已替代' } as Row)[d.state] || d.state}</small></button>)}</div>
+          columns={['主题', '观察指标', '课标整理编号', '课标文件页／正文页', '教材正文页'].map(k => ({ title: k === '教材正文页' ? '教材页码（原表索引）' : k, dataIndex: k }))} /></Card>
+        <Card title="上传的教学资料">
+          <MaterialUpload api={api} refresh={refresh} />
+          {!materials.some(d => d.source !== 'imported_question_bank') && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未上传教材文件" />}
+          <div className="books">{materials.filter(d => d.source !== 'imported_question_bank').map(d => <button key={d.id} className="book" onClick={() => openDoc(d.id)}><BookOutlined /> <strong>{d.name}</strong><small>{({ processing: '解析中', failed: '解析失败', review: '待校对', indexing: '建索引中', published: '已发布', replaced: '已替代' } as Row)[d.state] || d.state}</small></button>)}</div>
+        </Card>
+        <Card title="学情题库摘录（非上传教材）">
+          <Paragraph type="secondary">摘录来自已导入的「题目与材料」表，不是教材文件，也不经过 OCR。只有手动整理并确认发布后才进入检索。</Paragraph>
+          <Button disabled={!activeSnapshot} onClick={() => perform(async () => { const r = await api('/materials/seed-text', post); await refresh(); await openDoc(r.id) })}>整理为待校对摘录</Button>
+          <div className="books">{materials.filter(d => d.source === 'imported_question_bank').map(d =>
+            <button key={d.id} className="book" onClick={() => openDoc(d.id)}><BookOutlined /> <strong>{d.name}</strong><small>{d.state === 'published' ? '已发布摘录' : d.state === 'replaced' ? '已替代' : '待校对摘录'}</small></button>)}</div>
         </Card>
         <Card title="检索已发布资料"><Input.Search value={lookup} onChange={e => setLookup(e.target.value)} onSearch={v => perform(async () => setHits(await api('/materials/search' + query({query: v})) ))} enterButton="查找" />
           {hits.map(h => <Paragraph key={h.id} className="spaced"><Button type="link" onClick={() => setCitation(h)}>{h.title} · {h.locator}</Button> {h.text.slice(0, 130)}</Paragraph>)}</Card>
+        <Card title="下一步" size="small"><Space wrap><Button type="primary" onClick={() => goTo('overview')}>前往班级诊断</Button>
+          <Button onClick={() => goTo('chat')}>回到学情对话</Button><Text type="secondary">课程与资料可以跳过，之后随时补充和发布。</Text></Space></Card>
       </>}
       {page === 'student' && <>
-        <Card title="学生学习表现" extra={<Space wrap><Select allowClear placeholder="筛选班级" onChange={v => { setClassFilter(v || ''); setStudent('') }} options={groups.map(g => ({ value: g.group }))} />{studentChoice}{nodeChoice}</Space>}>
-          {!student ? <Empty description="选择学生查看雷达图和证据" /> : <>
+        <Card className="student-profile-card" title={target ? (student ? '学生 ' : '班级 ') + target.id : '学习表现'}
+          extra={<Space wrap><Select aria-label="选择画像对象" placeholder="搜索学生或班级" className="profile-target" allowClear
+            showSearch={{ optionFilterProp: 'label' }} value={target && target.kind + ':' + target.id} options={profileChoices}
+            onChange={(value?: string) => {
+              const kind = value?.startsWith('student:') ? 'student' : 'group'
+              setTarget(value ? { kind, id: value.slice(kind.length + 1) } : undefined)
+              setProfileSnapshot(''); setTopic(''); setFocusIndicator('')
+            }} />{nodeChoice}</Space>}>
+          {!target ? <Empty description="选择学生或班级查看画像" /> : !profileReady
+            ? profileError ? <Alert type="error" title={profileError} /> : <Skeleton active /> : <>
             <Space wrap><Button type={!topic ? 'primary' : 'default'} onClick={() => setTopic('')}>主题总览</Button>
               {(current.topics || []).map((a: Axis) => <Button key={a.id} type={topic === a.id ? 'primary' : 'default'} onClick={() => setTopic(a.id)}>{a.label}</Button>)}</Space>
-            {!!axes.length && <ChartFrame kind="radar" axes={axes} compare={compare} onSelect={chooseEvidence} />}
-            <Comparison axes={axes} compare={compare} />
-            {axisTable(axes)}
-            {!!current.totals?.length && <Table rowKey="节点编号" dataSource={current.totals} pagination={false} columns={[{ title: '测验', dataIndex: '节点编号' }, { title: '总分', dataIndex: '测验总分' }]} />}
-            <Space className="spaced"><Button type="primary" loading={busy} onClick={() => launch({ student })}>生成学习建议</Button><Button loading={busy} onClick={() => launch({ student, variant: true })}>生成建议与变式题</Button></Space>
+            {!!axes.length && <div className="student-profile-grid">
+              <ProfileRadar label={student ? '学生' : '班级'} axes={topic ? axes : current.topics || noAxes}
+                compare={topic ? compare : comparison.topics || noAxes} onSelect={chooseEvidence} />
+              {student ? <Comparison axes={axes} compare={compare} select={chooseEvidence} /> :
+                <section className="class-indicators" aria-label="班级指标与覆盖">
+                  <Title level={5}>指标与覆盖</Title>
+                  {axes.map(axis => <div className="class-indicator" id={'indicator-' + axis.id} key={axis.id}>
+                    <Button type="link" className="comparison-label" onClick={() => chooseEvidence(axis)}>{axis.label}</Button>
+                    <strong>{axis.score == null ? '暂无得分' : axis.score + '%'}</strong>
+                    <Text type="secondary">覆盖 {axis.coverage}/{axis.population} 人 · {axis.n} 条作答</Text>
+                  </div>)}
+                </section>}
+            </div>}
+            {student && <Button className="spaced" onClick={() => perform(async () => {
+              const status = await api('/deliveries/binding/' + param(student))
+              setBinding({ label: '', webhook: '', secret: '' })
+              setBindingLabel(status.label)
+              setBindingStudent(student)
+            })}>投递群组</Button>}
+            {student && <StudentFollowUps key={student + ":" + followUpVersion} api={api} student={student} snapshot={activeSnapshot} />}
+            {!!student && !!current.totals?.length && <Table rowKey="节点编号" dataSource={current.totals} pagination={false} columns={[{ title: '测验', dataIndex: '节点编号' }, { title: '总分', dataIndex: '测验总分' }]} />}
+            {!!data.snapshot_id && <Space wrap className="spaced">
+              <Button type="primary" loading={busy} onClick={() => setNewAdvice({ student, group: profileGroup, node })}>
+                {student ? '生成学习建议' : '生成班级建议'}
+              </Button>
+              {student && <Button loading={busy} onClick={() => setNewAdvice({ student, node, variant:true })}>生成建议与变式题</Button>}
+            </Space>}
           </>}
         </Card>
       </>}
       {page === 'drafts' && <>
-        <Card title="学习建议" extra={<Button disabled={!report?.snapshot_id} href="/api/export?formal=true">导出已确认成果</Button>}><Table rowKey="id" dataSource={drafts} columns={[
+        <Card title="学习建议" extra={<Space wrap><Button type="primary" onClick={() => setNewAdvice({})}>新建建议</Button><Button disabled={!report?.snapshot_id} href="/api/export?formal=true">导出已确认成果</Button></Space>}><Table rowKey="id" dataSource={drafts} columns={[
           { title: '对象', render: (_, d) => d.student || d.group }, { title: '测验', render: (_, d) => d.node || '全部' },
-          { title: '学情概述', dataIndex: 'observation' }, { title: '状态', render: (_, d) => !d.snapshot_id ? '历史记录 · 版本未登记' : d.approved ? '已确认' : ({ pass: '待确认', revise: '已退回', pending: '待终审' } as Row)[d.review_state] },
+          { title: '学情概述', render: (_, d) => <><div>{summaryLine(d.observation)}</div>
+            <Text type="secondary">{summaryLine(d.exercises?.[0]?.purpose || d.message || d.follow_up)}</Text></> }, { title: '状态', render: (_, d) => !d.snapshot_id ? '历史记录 · 版本未登记' : d.approved ? '已确认' : ({ pass: '待确认', revise: '已退回', pending: '待终审' } as Row)[d.review_state] },
           { title: '', render: (_, d) => <Button onClick={() => openDraft(d)}>打开</Button> },
         ]} /></Card>
-        <Card title="投递记录"><Table rowKey="id" dataSource={deliveries} columns={['student','group','state','message'].map((k,i) => ({ dataIndex: k, title: ['学生','收件群','状态','备注'][i] }))} /></Card>
+        {!!deliveries.length && <Card title="投递记录"><Table rowKey="id" dataSource={deliveries} columns={['student','group','state','message'].map((k,i) => ({ dataIndex: k, title: ['学生','收件群','状态','备注'][i] }))} /></Card>}
       </>}
       {page === 'settings' && <>
-        <Card title="本机依赖"><Space wrap><Tag color={health.model_configured ? 'green' : 'orange'}>GLM {health.model_configured ? '已配置' : '待配置'}</Tag><Tag color={health.ocr_configured ? 'green' : 'orange'}>PaddleOCR {health.ocr_configured ? '已配置' : '待安装'}</Tag></Space></Card>
-        <Card title="后台任务"><Table rowKey="id" dataSource={jobs} columns={[{ title: '类型', render: (_,j) => ({ extract:'解析资料', publish:'建立索引', ...runNames } as Row)[j.kind] },
-          { title: '状态', render: (_,j) => <Tag color={j.state === 'failed' ? 'red' : 'blue'}>{({ queued:'排队', running:'处理中', done:'完成', failed:'失败' } as Row)[j.state]}</Tag> },
-          { title: '错误', dataIndex: 'error' }, { title: '操作', render: (_,j) => j.state === 'failed' ? <Button onClick={() => perform(() => api('/jobs/' + j.id + '/retry', post))}>重试</Button> : null }]} /></Card>
+        <Card id="model-access" title="模型接入">
+          <ModelAccessPage access={modelAccess} api={api} update={setModelAccess} />
+        </Card>
+        <Card title="任务中心"><Button onClick={() => goTo('tasks')}>打开任务中心</Button></Card>
+        <Card title="运行环境"><Space wrap>
+          <Tag color={health.model_configured ? 'success' : 'warning'}>模型 {health.model_configured ? '已配置' : '待配置'}</Tag>
+          <Tag color={health.ocr_configured ? 'success' : 'warning'}>PaddleOCR {health.ocr_configured ? '已配置' : '待安装'}</Tag>
+          <Tag>SQLite 本机业务库</Tag>
+          <Tag>Windows 原生部署</Tag>
+        </Space></Card>
+        <Card title="使用引导"><Button onClick={() => goTo('import')}>查看数据导入步骤</Button></Card>
       </>}
     </Layout.Content>
-    <Drawer open={!!replay} title="Q015 案例回放" size={850} onClose={() => setReplay(undefined)}
+    <Drawer open={!!newAdvice} title="新建学习建议" onClose={() => setNewAdvice(undefined)}>
+      {newAdvice && <Space direction="vertical" style={{ width: '100%' }}>
+        {!report?.snapshot_id && <Alert type="info" title="请先导入并确认学情数据" action={<Button onClick={() => { setNewAdvice(undefined); goTo('import') }}>去导入</Button>} />}
+        <Select aria-label="建议对象" placeholder="选择学生或班级" showSearch style={{ width: '100%' }}
+          value={newAdvice.student ? 'student:' + newAdvice.student : newAdvice.group ? 'group:' + newAdvice.group : undefined}
+          options={[{label:'学生',options:students.map(r => ({value:'student:'+r.学生编号,label:r.学生编号}))},
+            {label:'班级',options:groups.map(r => ({value:'group:'+r.group,label:r.group}))}]}
+          onChange={key => { const [kind, ...id] = key.split(':'); setNewAdvice({ ...newAdvice, student:'', group:'', [kind]:id.join(':'), variant:false }) }} />
+        <Select aria-label="建议测验" placeholder="全部测验" allowClear style={{ width: '100%' }} value={newAdvice.node}
+          options={(data.nodes || []).map((id:string) => ({value:id,label:id}))} onChange={node => setNewAdvice({ ...newAdvice,node })} />
+        {newAdvice.student && <label><input type="checkbox" checked={!!newAdvice.variant} onChange={e => setNewAdvice({...newAdvice,variant:e.target.checked})} /> 同时生成变式题</label>}
+        <Button type="primary" loading={busy} disabled={!report?.snapshot_id || !(newAdvice.student || newAdvice.group)}
+          onClick={() => void launch({...newAdvice,snapshot_id: report?.snapshot_id}, () => setNewAdvice(undefined))}>开始生成</Button>
+      </Space>}
+    </Drawer>
+    <Drawer open={!!replay} title="演示串讲 · Q015" size="min(1100px, 100vw)" onClose={() => setReplay(undefined)}
       styles={{ body: { display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}>
       {replay && <CaseReplay data={replay} openCitation={setCitation} />}
     </Drawer>
@@ -447,23 +691,32 @@ function Workbench() {
           setCorrection(undefined); openRun(result.run_id)
         })}>保存修订</Button></>}
     </Drawer>
-    <Drawer open={!!selected} title={selected?.axis.label} size={700} onClose={() => { evidenceRequest.current++; setSelected(undefined) }}>
-      {selected && <><Space wrap><Tag>{selected.group || selected.student}</Tag><Tag>{selected.node || '全部测验'}</Tag>
-        <Text>覆盖 {selected.axis.coverage}/{selected.axis.population} 人 · 有效作答 {selected.rows.length} 条</Text></Space>
+    <Drawer open={!!selected} title="作答证据" size="min(980px, 100vw)" onClose={() => { evidenceRequest.current++; setSelected(undefined) }}>
+      {selected && <><Space wrap><Tag>{selected.student || selected.group}</Tag><Tag>{selected.node || '全部测验'}</Tag>
+        <Text>{selected.axis.label} · {selected.rows.length} 条作答</Text></Space>
         <details><summary>数据快照</summary><code>{selected.snapshot_id}</code></details>
-        <Distribution values={selected.axis.distribution} />
-        {selected.rows.map((r: Row) => <Card size="small" className="spaced" key={r.作答事件编号}
-          title={r.学生编号 + ' · ' + r.材料编号 + ' · ' + r.得分 + '/' + r.满分}
-          extra={<Button size="small" loading={busy} onClick={() => {
-            void launch({ student: r.学生编号, node: r.节点编号, snapshot_id: selected.snapshot_id, anchor_event: r.作答事件编号 })
-            setSelected(undefined)
-          }}>基于本题生成建议</Button>}>
-          <Paragraph>{r.题目.题干或内容}</Paragraph><Paragraph className="preserve">{r.解答过程}</Paragraph>
-          <Paragraph>最终填写：{r.学生最终作答 || '—'}</Paragraph><Text type="secondary">{r.评分点得分} · {r.来源.source}:{r.来源.line}</Text>
-        </Card>)}</>}
+        {selected.rows.length > 1 && <Select className="spaced" aria-label="选择作答" value={answerId} onChange={setAnswerId}
+          options={selected.rows.map((row: Row) => ({ value: row.作答事件编号, label: row.节点编号 + ' · ' + row.材料编号 + ' · ' + (row.评分状态 === '已评分' ? row.得分 + '/' + row.满分 : row.评分状态) }))} />}
+        {selectedAnswer ? <div className="spaced">
+          <AnswerEvidence key={answerId} answer={selectedAnswer as Parameters<typeof AnswerEvidence>[0]['answer']} />
+          <Space wrap className="spaced">
+            <Button type="primary" loading={busy} disabled={!linkedDraft && selectedAnswer.评分状态 !== '已评分'} onClick={() => {
+              if (linkedDraft) openDraft(linkedDraft)
+              else void launch({ student: selectedAnswer.学生编号, node: selectedAnswer.节点编号, snapshot_id: selected.snapshot_id, anchor_event: answerId },
+                () => setSelected(undefined))
+            }}>{linkedDraft ? '查看对应练习' : '基于本题生成建议'}</Button>
+            {teachingSource && <Button onClick={() => setCitation(teachingSource)}>查看资料原文</Button>}
+          </Space>
+        </div> : <Empty description={selected.axis.status} />}
+      </>}
     </Drawer>
     <Drawer open={!!doc} title={doc?.name} size={850} onClose={() => setDoc(undefined)}>
-      {doc && <><Space><Tag>{doc.state}</Tag><Button disabled={!['review','published'].includes(doc.state) || !Object.keys(changes).length} onClick={() => perform(async () => {
+      {doc && <>
+        {doc.error && <Alert type="error" title={doc.error} />}
+        {doc.extraction && <Paragraph type="secondary">PDF 文字层 {doc.extraction.text_pages} 页 · {doc.extraction.ocr_units
+          ? (doc.extraction.ocr_engine || 'OCR') + ' ' + doc.extraction.ocr_units + ' 处' : '本资料未使用 OCR'}</Paragraph>}
+        {doc.source === 'imported_question_bank' && <Paragraph type="secondary">来源：已导入的题目与材料表；非上传教材</Paragraph>}
+        <Space><Tag>{doc.state}</Tag><Button disabled={!['review','published'].includes(doc.state) || !Object.keys(changes).length} onClick={() => perform(async () => {
         const result = await api('/materials/' + doc.id, json('PUT', { changes })); await openDoc(result.id); await refresh()
       })}>保存校订</Button><Button type="primary" disabled={doc.state !== 'review' || !!Object.keys(changes).length} onClick={() => perform(async () => {
         await api('/materials/' + doc.id + '/publish', post); setDoc(undefined); await refresh()
@@ -473,14 +726,43 @@ function Workbench() {
         <Input.TextArea value={changes[c.id] ?? c.text} onChange={e => setChanges({ ...changes, [c.id]: e.target.value })} autoSize={{ minRows: 2, maxRows: 8 }} />
       </Card>)}</>}
     </Drawer>
-    <Drawer open={!!citation} title={citation?.title + ' · ' + citation?.locator} size={730} onClose={() => setCitation(undefined)}>
+    <Drawer open={!!citation} title={citation?.title + ' · ' + citation?.locator} size="min(730px, 100vw)" onClose={() => setCitation(undefined)}
+      afterOpenChange={open => { if (!open) { citationTrigger.current?.focus({ preventScroll: true }); citationTrigger.current = null } }}>
       {citation && <><Paragraph className="preserve">{citation.text}</Paragraph><SourcePage key={citation.id} citation={citation} /></>}
     </Drawer>
-    <Drawer open={!!draft} title={'学习建议 · ' + (draft?.student || draft?.group || '')} size={750} onClose={() => setDraft(undefined)}>
-      {draft && <><Title level={5}>学情与依据</Title>
+    <Drawer open={!!bindingStudent} title={'投递群组 · ' + bindingStudent} size="min(500px, 100vw)"
+      onClose={() => { setBindingStudent(''); setBinding({ label: '', webhook: '', secret: '' }) }}>
+      <Space orientation="vertical" className="wide">
+        <Text>{bindingLabel ? '已绑定 · ' + bindingLabel : '未绑定'}</Text>
+        <Input placeholder="群标签" value={binding.label} onChange={e => setBinding({ ...binding, label: e.target.value })} />
+        <Input.Password placeholder="Webhook 地址" value={binding.webhook} onChange={e => setBinding({ ...binding, webhook: e.target.value })} />
+        <Input.Password placeholder="签名密钥（可选）" value={binding.secret} onChange={e => setBinding({ ...binding, secret: e.target.value })} />
+        <Button loading={busy} disabled={!binding.label || !binding.webhook} onClick={() => perform(async () => {
+          const saved = await api('/deliveries/binding/' + param(bindingStudent), json('PUT', binding))
+          setBindingLabel(saved.label)
+          setBinding({ label: '', webhook: '', secret: '' })
+          setPreview(undefined)
+          message.success('已保存绑定')
+        })}>保存绑定</Button>
+      </Space>
+    </Drawer>
+    <Drawer open={!!draft} title={(draft?.draft_mode === 'observation' ? '学情观察稿 · ' : '教学安排 · ') + (draft?.student || draft?.group || '')} size="min(860px, 100vw)" onClose={() => setDraft(undefined)}
+      footer={draft && <Space wrap className="draft-controls">
+        {changed ? <Button type="primary" loading={busy} onClick={() => saveDraft(false)}>保存修订并重新终审</Button>
+          : draft.approved ? <Button type="primary" loading={busy} onClick={() => perform(async () => setPreview(await api('/recommendations/' + draft.id + '/preview')))}>查看学生练习单</Button>
+          : <Button type="primary" loading={busy} disabled={currentReview?.decision !== 'pass'} onClick={() => saveDraft(true)}>确认并预览</Button>}
+        {(savedDraft?.review_run_id || draft.run_id) && <Button onClick={() => {
+          openRun(savedDraft?.review_run_id || draft.run_id); setDraft(undefined); setSelected(undefined)
+        }}>查看运行</Button>}
+        {!changed && !draft.approved && currentReview?.decision !== 'pass' && <Text type="secondary">当前修订需通过终审</Text>}
+      </Space>}>
+      {draft && <>
+        {draft.draft_mode === 'observation' && <Alert className="spaced" type="info" title="仅依据本次学情与作答记录，不含教材讲解或练习" />}
+        {draft.variant_omission_reason && <Alert className="spaced" type="info" title={draft.variant_omission_reason} />}
+        <Title level={5}>学情与依据</Title>
         <Paragraph editable={draft.snapshot_id ? { onChange: observation => { setDraft({ ...draft, observation, approved: false }); setPreview(undefined) } } : false}>{draft.observation}</Paragraph>
         <Paragraph editable={draft.snapshot_id ? { onChange: uncertainty => { setDraft({ ...draft, uncertainty, approved: false }); setPreview(undefined) } } : false}>{draft.uncertainty}</Paragraph>
-        {draft.evidence.map((r: Row) => <Paragraph key={r.id}>{r.材料编号} · {r.得分}/{r.满分} · {r.阶段 || r.节点编号} · {r.评分点得分}<br />{r.解答过程}</Paragraph>)}
+        {draft.evidence.map((r: Row) => <Paragraph key={r.id}>{r.材料编号} · {r.得分}/{r.满分} · {r.阶段 || r.节点编号} · {r.评分点得分}<br /><span className="preserve">{r.解答过程}</span></Paragraph>)}
         {draft.teaching_points?.length ? <><Title level={5}>教学说明与原文</Title>
           {draft.teaching_points.map((point: Row, index: number) => <Card size="small" className="spaced" key={index}>
             <Paragraph editable={{ onChange: value => {
@@ -492,12 +774,12 @@ function Workbench() {
               <Button key={c.id} type="link" onClick={() => setCitation(c)}>{c.title} · {c.locator}</Button>)}
           </Card>)}</> : draft.citations.map((c: Row) =>
           <Button key={c.id} type="link" onClick={() => setCitation(c)}>{c.title} · {c.locator}</Button>)}
-        <Title level={5}>练习顺序</Title>
-        {draft.exercises.map((q: Row, index: number) => <Card size="small" className="spaced" key={q.question_id} title={q.question_id} extra={<Space>
+        {(draft.draft_mode !== 'observation' || !!draft.exercises.length) && <Title level={5}>练习顺序</Title>}
+        {draft.exercises.map((q: Row, index: number) => <Card size="small" className="spaced" key={q.question_id} title={(index + 1) + ' · ' + q.question_id} extra={<Space>
           {[-1, 1].map(delta => <Button key={delta} size="small" disabled={index + delta < 0 || index + delta >= draft.exercises.length} onClick={() => {
             const items = [...draft.exercises]; const item = items.splice(index, 1)[0]; items.splice(index + delta, 0, item); setDraft({ ...draft, exercises: items, approved: false }); setPreview(undefined)
           }}>{delta < 0 ? '上移' : '下移'}</Button>)}</Space>}>
-          <Paragraph>{draft.questions[q.question_id]?.题干或内容}</Paragraph><Text>{q.purpose}</Text>
+          <Paragraph className="practice-question">{draft.questions[q.question_id]?.题干或内容}</Paragraph>{q.purpose && <Text type="secondary">{q.purpose}</Text>}
           {!!q.evidence_ids?.length && <details className="spaced"><summary>查看练习依据</summary>
             {draft.evidence.filter((row: Row) => q.evidence_ids.includes(row.id)).map((row: Row) =>
               <Paragraph key={row.id}>{row.材料编号} · {row.得分}/{row.满分} · {row.评分点得分}<br />{row.解答过程}</Paragraph>)}
@@ -509,21 +791,16 @@ function Workbench() {
               setDraft({ ...draft, exercises, approved: false }); setPreview(undefined)
             } } : false}>{h}</Paragraph>
           </li>)}</ol></Card>)}
+        {draft.student && draft.snapshot_id && <FollowUpEditor key={draft.id + ":" + draft.revision} api={api}
+          id={draft.id} revision={draft.revision} approved={draft.approved && !changed} snapshot={activeSnapshot}
+          onAssigned={() => setFollowUpVersion(version => version + 1)} />}
         {draft.checked_variant && <Alert className="spaced" type="success" message={draft.checked_variant.question} description={'教师参考答案：' + draft.checked_variant.answer} />}
         <Title level={5}>给学生的话</Title><Input.TextArea value={draft.message} onChange={e => { setDraft({ ...draft, message: e.target.value, approved: false }); setPreview(undefined) }} rows={4} />
         <div className="spaced"><Tag>修订 {draft.revision}</Tag><Tag>{changed ? '有未保存修改' : draft.approved ? '已确认' : currentReview?.decision === 'pass' ? '通过终审' : currentReview?.decision === 'revise' ? '退回修订' : draft.snapshot_id ? '待终审' : '历史记录'}</Tag></div>
         {currentReview && <Card size="small" className="spaced" title="模型终审"><ReviewPanel review={currentReview}
           canOpenRef={ref => draft.citations.some((item: Row) => item.id === ref)}
           openRef={ref => setCitation(draft.citations.find((item: Row) => item.id === ref))} /></Card>}
-        <Space wrap className="spaced">
-          {draft.snapshot_id && <Button loading={busy} disabled={!changed} onClick={() => saveDraft(false)}>保存修订并重新终审</Button>}
-          <Button type="primary" loading={busy} disabled={!draft.snapshot_id || changed || currentReview?.decision !== 'pass'}
-            onClick={() => saveDraft(true)}>确认并预览卡片</Button>
-          {(savedDraft?.review_run_id || draft.run_id) && <Button onClick={() => {
-            openRun(savedDraft?.review_run_id || draft.run_id); setDraft(undefined)
-          }}>查看运行</Button>}
-        </Space>
-        {preview && <Card className="spaced" size="small" title={preview.group || '尚未绑定收件群'}><Paragraph className="preserve">{preview.text}</Paragraph></Card>}
+        {preview && <div ref={practicePreview}><Card className="spaced" size="small" title="学生练习单"><Paragraph className="preserve">{preview.text}</Paragraph></Card></div>}
         {draft.student && <details className="spaced"><summary>配置学生专属飞书群</summary><Space orientation="vertical" className="wide">
           <Input placeholder="群标签（请与学生确认）" value={binding.label} onChange={e => setBinding({ ...binding, label: e.target.value })} />
           <Input.Password placeholder="Webhook 地址" value={binding.webhook} onChange={e => setBinding({ ...binding, webhook: e.target.value })} />
@@ -541,8 +818,5 @@ function Workbench() {
   </Layout>
 }
 
-createRoot(document.getElementById('root')!).render(<ConfigProvider locale={zhCN} theme={{ token: {
-  colorPrimary:'#167765', colorBgLayout:'#f4f7f5', colorText:'#162f29', borderRadius:12,
-  fontFamily:'Inter, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif', fontSize:14,
-  motion: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-}, components: { Menu: { itemSelectedBg:'#e3f2eb', itemSelectedColor:'#145b4c' } } }}><App><Workbench /></App></ConfigProvider>)
+applyWorkbenchPalette()
+createRoot(document.getElementById('root')!).render(<ConfigProvider locale={zhCN} theme={workbenchTheme}><App><Workbench /></App></ConfigProvider>)
