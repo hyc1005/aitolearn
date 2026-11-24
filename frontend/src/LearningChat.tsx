@@ -5,6 +5,7 @@ import { ActiveStatus } from './ActiveStatus'
 import { AnswerEvidence, type Answer } from './AnswerEvidence'
 import { effortLabel, json, type Api, type ModelAccess, type ModelChoice } from './ModelAccess'
 import { ChatMenu } from './ChatMenu'
+import { ChatAttachments, type Reference } from './ChatAttachments'
 
 type Citation = { id: string; title: string; locator: string; material: string; text: string; bbox?: number[] }
 type Source = { title: string; locator: string } & (
@@ -18,13 +19,13 @@ type CardData = {
 }
 type Result = {
   answer: string; parts: Part[]; model?: string; cards?: CardData[]
-  model_call?: ModelChoice; selection?: ModelChoice
+  model_call?: ModelChoice; selection?: ModelChoice; elapsed_ms?: number
   trace?: { tool: string; status: string; count?: number | null; student?: string; group?: string; node?: string; indicator?: string }[]
   mode?: string
   snapshot_id?: string; session_id?: string; context?: Context
 }
 type Context = { student: string; group: string; node: string; anchor_event?: string; snapshot_id?: string }
-type Turn = { question: string; result?: Result; error?: string; context?: Context }
+type Turn = { question: string; result?: Result; error?: string; context?: Context; started?: number; elapsed?: number; attachments?: Reference[] }
 type Onboarding = {
   state: string; detail: Record<string, any>; dismissed: boolean; completed: boolean
   snapshot_id?: string; model_configured: boolean
@@ -75,6 +76,8 @@ export function LearningChat(props: Props) {
   const [sourceRows, setSourceRows] = useState<Answer[]>([])
   const [restoring, setRestoring] = useState(Boolean(sessionId))
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [attachmentOpen, setAttachmentOpen] = useState(false)
+  const [attachments, setAttachments] = useState<Reference[]>([])
   const [pickerKind, setPickerKind] = useState<'student' | 'group'>('student')
   const bottom = useRef<HTMLDivElement>(null)
   const pendingProposals = useRef(new Set<string>())
@@ -120,7 +123,7 @@ export function LearningChat(props: Props) {
       setTurns((session.turns || []).map((turn: any) => ({
         question: turn.question,
         context: turn.context,
-        result: { answer: turn.answer, parts: turn.parts || [], cards: turn.cards || [], model_call: turn.model_call, model: turn.model,
+        result: { answer: turn.answer, parts: turn.parts || [], cards: turn.cards || [], model_call: turn.model_call, model: turn.model, elapsed_ms: turn.elapsed_ms,
           trace: turn.trace, mode: turn.mode, snapshot_id: turn.snapshot_id, session_id: session.id },
       })))
     }).catch(error => {
@@ -198,19 +201,21 @@ export function LearningChat(props: Props) {
     } catch { /* the next poll retries */ }
   }
 
-  async function send(question: string, override?: Partial<Context>, history = turns) {
+  async function send(question: string, override?: Partial<Context>, history = turns, refs = attachments) {
     question = question.trim()
     if (!question || busy || restoring || savingChoice || stale) return
     const outgoing: Context = { ...context, ...override }
     setBusy(true)
     setDraft('')
-    const shown: Turn = { question, context: outgoing }
+    const shown: Turn = { question, context: outgoing, started:Date.now(), attachments:refs }
+    setAttachments([])
     setTurns([...history, shown])
     try {
       const result = await api<Result>('/learning-chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question,
+          attachments: refs,
           session_id: sessionId,
           ...(preferred || {}),
           snapshot_id: outgoing.snapshot_id ?? props.snapshot ?? '',
@@ -233,7 +238,7 @@ export function LearningChat(props: Props) {
       if (!props.snapshot && result.cards?.some(card => card.kind === 'import'))
         write('aitolearn.import.question', question, sessionStorage)
     } catch (error) {
-      setTurns([...history, { question, context: outgoing, error: (error as Error).message }])
+      setTurns([...history, { ...shown, elapsed: Date.now() - shown.started!, error: (error as Error).message }])
     } finally { setBusy(false) }
   }
 
@@ -246,6 +251,7 @@ export function LearningChat(props: Props) {
     setWelcome(greeting())
     if (savingChoice) return
     setChoice(undefined)
+    setAttachments([])
     setLegacyProvider(undefined)
     setChoiceError('')
     setHistoryOpen(false)
@@ -283,6 +289,8 @@ export function LearningChat(props: Props) {
         result: { ...turn.result, cards: (turn.result.cards || []).map(item => item.id === card.id ? response.proposal : item) },
       }))
       if (response.result?.run_id) props.onTaskStarted()
+      if (response.result?.recommendation_run_id) props.openRun(response.result.recommendation_run_id)
+      if (response.result?.continuation_error) window.alert('快照已启用，未自动生成建议：' + response.result.continuation_error)
       if (card.action === 'confirm_import' && response.result?.snapshot_id)
         setContext({ student: '', group: '', node: '', snapshot_id: response.result.snapshot_id })
       if (response.result?.snapshot_id) props.onTaskStarted()
@@ -352,16 +360,17 @@ export function LearningChat(props: Props) {
         {(turn.context?.student || turn.context?.group || turn.result?.context?.student || turn.result?.context?.group) &&
           <Tag className="chat-answer-context">当时对象 · {turn.context?.student || turn.context?.group ||
             turn.result?.context?.student || turn.result?.context?.group}</Tag>}
-        {turn.error ? <div><p role="alert" className="chat-error">{turn.error}</p>
+        {turn.error ? <div><p role="alert" className="chat-error">{turn.error}{turn.elapsed != null && ' · ' + (turn.elapsed / 1000).toFixed(1) + ' 秒'}</p>
           {index === turns.length - 1 && <>
             <Space wrap>
-              <Button disabled={busy} onClick={() => void send(turn.question, turn.context, turns.slice(0, index))}>重试</Button>
+              <Button disabled={busy} onClick={() => void send(turn.question, turn.context, turns.slice(0, index), turn.attachments)}>重试</Button>
               {turn.error.includes('检查模型设置') && <Button onClick={props.openAccess}>打开模型设置</Button>}
             </Space>
           </>}
         </div> : turn.result ? <div>
           {turn.result.model_call ? <small>{turn.result.model_call.model_id} · {turn.result.model_call.connection_name} · {effortLabel[turn.result.model_call.effort]}</small>
             : turn.result.model && <small>{turn.result.model}</small>}
+          {turn.result.elapsed_ms != null && <small className="model-duration">耗时 {(turn.result.elapsed_ms / 1000).toFixed(1)} 秒</small>}
           {turn.result.answer && <p className="preserve">{turn.result.answer}</p>}
           {(turn.result.cards || []).filter(card => card.kind !== 'profile').map((card, cardIndex) => <ResultCard key={card.id || cardIndex} card={card}
             api={api} snapshot={turn.result?.snapshot_id || props.snapshot}
@@ -370,7 +379,7 @@ export function LearningChat(props: Props) {
             openDraft={props.openDraft} openPage={props.openPage} />)}
           {!!(turn.result.trace?.length || turn.result.cards?.some(card => card.kind === 'profile')) &&
             <details className="chat-tool-details"><summary>{turn.result.cards?.filter(card => card.kind === 'profile')
-              .map(card => [card.target?.id, card.node].filter(Boolean).join(' / ')).join('、') || '工具调用'}
+              .map(card => [card.target?.id, card.node].filter(Boolean).join(' / ')).join('、') || '执行过程与依据'}
               {!!turn.result.trace?.length && ' · ' + turn.result.trace.length + ' 步'}
             </summary>
             {(turn.result.cards || []).filter(card => card.kind === 'profile').map((card, cardIndex) =>
@@ -381,6 +390,7 @@ export function LearningChat(props: Props) {
             {!!turn.result.trace?.length && <ol>{turn.result.trace.map((step, index) => <li key={index}>
               {({ resolve_scope: '解析查询对象', read_profile: '读取指标和覆盖人数', read_evidence: '读取原始作答',
                 search_materials: '检索资料', open_import: '定位数据导入', read_cleaning: '查看清洗进度',
+                read_follow_ups: '读取练后回看', read_distribution: '读取班级分布', read_attachments: '读取本轮附件', read_progress: '汇总历次成绩',
                 propose_recommendation: '准备建议任务', open_page: '定位业务页面', read_exercises: '查找练习',
                 read_jobs: '查询任务', propose_retry: '准备重试', read_material_reviews: '查询待校对资料',
                 read_material_review: '读取待校对段落', propose_publish_material: '准备发布',
@@ -401,12 +411,14 @@ export function LearningChat(props: Props) {
                 {source.title} · {source.locator}
               </Button>
             </blockquote>)}
-        </div> : <ActiveStatus label="正在回答" />}
+        </div> : <ActiveStatus label="正在回答" started={turn.started} />}
       </article>)}
       <div ref={bottom} />
     </div>
     <div className="chat-composer-dock"><form className="chat-composer" onSubmit={submit}>
       {(stale || choiceError) && <p role="status">{choiceError || '本会话原模型或思考档位已不可用，请为下一条消息重选。'}</p>}
+      {!!attachments.length && <Space wrap>{attachments.map(item => <Tag key={item.name} closable
+        onClose={() => setAttachments(old=>old.filter(ref=>ref !== item))}>{item.name} · 本轮参考</Tag>)}</Space>}
       <Input.TextArea aria-label="输入学情问题" placeholder={contextLabel ? `询问 ${contextLabel}，或说“帮我生成建议”` : '问一个问题，或说“看看 DC02 最近一次测验”'}
         variant="borderless" maxLength={1200} autoSize={{ minRows: 2, maxRows: 5 }} value={draft} onChange={event => setDraft(event.target.value)}
         onPressEnter={event => {
@@ -415,6 +427,8 @@ export function LearningChat(props: Props) {
       <div className="chat-composer-actions">
       <Space wrap className="chat-context">
         <Popover trigger="click" open={pickerOpen} onOpenChange={setPickerOpen} content={<div className="context-picker">
+          <Button type="primary" onClick={()=>{setPickerOpen(false);setAttachmentOpen(true)}}>上传文件</Button>
+          <strong>添加学情上下文</strong>
           <Select aria-label="上下文类型" value={pickerKind} onChange={value => setPickerKind(value)}
             options={[{ value: 'student', label: '学生' }, { value: 'group', label: '班级' }]} />
           <Select aria-label="选择上下文对象" showSearch={{ optionFilterProp: 'label' }} value={context[pickerKind] || undefined}
@@ -446,6 +460,8 @@ export function LearningChat(props: Props) {
         </div>
       </div>
     </form></div>
+    {attachmentOpen && <ChatAttachments api={api} context={context} close={()=>setAttachmentOpen(false)}
+      useReferences={setAttachments} openRun={props.openRun} openImport={props.openImport} openMaterials={()=>props.openPage('materials')} />}
     <Drawer open={!!source} title="学生原始作答" size="min(850px, 100vw)" onClose={() => { setSource(undefined); setSourceRows([]) }}>
       {sourceRows.length > 1 && <Select aria-label="选择作答事件" value={source?.作答事件编号}
         options={sourceRows.map(row => ({ value: row.作答事件编号, label: [row.节点编号, row.材料编号, row.作答事件编号].join(' · ') }))}

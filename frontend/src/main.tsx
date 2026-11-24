@@ -5,7 +5,7 @@ import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout,
 import { BookOutlined } from '@ant-design/icons'
 import { NavIcon } from './NavIcon'
 import zhCN from 'antd/locale/zh_CN'
-import AgentWorkbench, { ReviewPanel, runNames } from './AgentWorkbench'
+import AgentWorkbench, { ReviewPanel } from './AgentWorkbench'
 import { CaseReplay, type CaseData } from './CaseReplay'
 import { CleaningCounts, issueFilters } from './CleaningCounts'
 import { ActiveStatus } from './ActiveStatus'
@@ -14,20 +14,15 @@ import { AnswerEvidence } from './AnswerEvidence'
 import { applyWorkbenchPalette, chartComparisonColor, workbenchTheme } from './workbenchTheme'
 import { LearningChat } from './LearningChat'
 import { ModelAccessPage, type ModelAccess } from './ModelAccess'
-import * as echarts from 'echarts/core'
-import { RadarChart } from 'echarts/charts'
-import { RadarComponent, TooltipComponent } from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
 import './style.css'
 
-echarts.use([RadarChart, RadarComponent, TooltipComponent, CanvasRenderer])
 const { Title, Text, Paragraph } = Typography
 type Row = Record<string, any>
 type Axis = { id: string; label: string; score: number | null; n: number; coverage: number; population: number; status: string; earned: number; possible: number; distribution: number[] }
 const noAxes: Axis[] = []
 const pages = [
   ['chat', '学情对话'], ['import', '数据导入'], ['materials', '课程与资料'], ['overview', '班级诊断'],
-  ['student', '画像'], ['drafts', '学习建议'], ['settings', '设置'],
+  ['student', '画像'], ['drafts', '学习建议'], ['tasks', '任务中心'], ['settings', '设置'],
 ] as const
 const pageKeys = new Set<string>(pages.map(([key]) => key))
 type ProfileTarget = { kind: 'student' | 'group'; id: string }
@@ -39,7 +34,7 @@ function summaryLine(value?: string) {
 }
 
 function pageFromHash() {
-  if (location.hash.startsWith('#agent')) return 'run'
+  if (location.hash.startsWith('#agent')) return location.hash.includes('/') ? 'run' : 'tasks'
   if (location.hash === '#models') return 'settings'
   const key = location.hash.replace(/^#/, '').split('/')[0]
   return pageKeys.has(key) ? key : 'chat'
@@ -61,58 +56,39 @@ function query(values: Record<string, string>) { return '?' + new URLSearchParam
 function ProfileRadar({ axes, compare, label, onSelect }: {
   axes: Axis[]; compare: Axis[]; label: string; onSelect: (axis: Axis) => void
 }) {
-  const { token } = theme.useToken()
-  const ref = useRef<HTMLDivElement>(null)
-  const instance = useRef<ReturnType<typeof echarts.init>>(null)
-  const comparison = new Map(compare.map(axis => [axis.id, axis.score]))
-  const previous = axes.map(axis => comparison.get(axis.id))
-  const hasComparison = previous.length > 0 && previous.every(value => value != null)
-  const latest = useRef({ axes, onSelect })
-  useLayoutEffect(() => { latest.current = { axes, onSelect } })
-  useEffect(() => {
-    if (!ref.current) return
-    const chart = echarts.init(ref.current)
-    instance.current = chart
-    chart.on('click', event => {
-      const axis = latest.current.axes.find(item => item.label === event.name?.replace(/\n/g, ''))
-      if (axis) latest.current.onSelect(axis)
-    })
-    const observer = new ResizeObserver(() => chart.resize())
-    observer.observe(ref.current)
-    return () => { observer.disconnect(); chart.dispose(); instance.current = null }
-  }, [])
-  useEffect(() => {
-    const complete = axes.every(axis => axis.score != null)
-    instance.current?.setOption({
-      baseOption: {
-        animation: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
-        tooltip: { textStyle: { fontSize: token.fontSizeSM } },
-        textStyle: { fontFamily: token.fontFamily, fontSize: token.fontSizeSM },
-        radar: { indicator: axes.map(axis => ({ name: axis.label, max: 100 })), radius: '53%', axisNameGap: 8,
-          triggerEvent: true, axisName: { color: token.colorTextSecondary, fontSize: token.fontSizeSM, width: 94, overflow: 'break' } },
-        series: [{ type: 'radar', lineStyle: { width: complete ? 2 : 0 }, symbolSize: 8,
-          data: [{ name: label, value: axes.map(axis => axis.score ?? NaN), itemStyle: { color: token.colorPrimary },
-            areaStyle: { opacity: complete ? 0.18 : 0 } },
-            ...(hasComparison ? [{ name: '班级参照', value: previous,
-              itemStyle: { color: chartComparisonColor }, lineStyle: { width: 1, type: 'dashed' } }] : [])] }],
-      },
-      media: [{ query: { maxWidth: 520 }, option: {
-        radar: { axisName: {
-          lineHeight: 19,
-          formatter: (label: string) => label.match(/.{1,6}/gu)?.join('\n') || label,
-        } },
-      } }, { query: { maxWidth: 365 }, option: {
-        radar: { radius: '41%', axisName: {
-          lineHeight: 19,
-          formatter: (label: string) => label.match(/.{1,4}/gu)?.join('\n') || label,
-        } },
-      } }],
-    }, { notMerge: true })
-  }, [axes, compare, label, token])
-  return <section className="student-radar" aria-label="整体轮廓">
-    <Title level={5}>整体轮廓</Title>
-    <Space wrap className="radar-legend"><span>{label}</span>{hasComparison && <span className="radar-class">班级参照</span>}</Space>
-    <div className="chart radar" ref={ref} role="img" aria-label={label + '学习表现雷达图'} />
+  const map = new Map(compare.map(a => [a.id, a.score]))
+  const hasClass = axes.some(a => map.get(a.id) != null)
+  const point = (index: number, score: number) => {
+    const angle = index * 2 * Math.PI / axes.length - Math.PI / 2
+    return [180 + Math.cos(angle) * 104 * score / 100, 150 + Math.sin(angle) * 104 * score / 100]
+  }
+  const render = (scores: (number | null | undefined)[], dashed: boolean) => {
+    const color = dashed ? chartComparisonColor : 'var(--accent)'
+    const coords = scores.map((score, i) => score == null ? null : point(i, score))
+    return <g stroke={color} strokeWidth={dashed ? 2.5 : 2} strokeDasharray={dashed ? '6 4' : undefined}>
+      {coords.every(Boolean) ? <polygon points={coords.map(p => p!.join(',')).join(' ')} fill={dashed ? 'none' : color} fillOpacity={.12} />
+        : coords.map((p, i) => { const next = coords[(i + 1) % coords.length]; return p && next &&
+          <line key={i} x1={p[0]} y1={p[1]} x2={next[0]} y2={next[1]} /> })}
+      {coords.map((p, i) => p && <circle key={i} cx={p[0]} cy={p[1]} r={dashed ? 5 : 3} strokeDasharray="none" fill={dashed ? 'none' : color}>
+        <title>{axes[i].label} · {dashed ? '班级参照' : label} {scores[i]}%</title>
+      </circle>)}
+    </g>
+  }
+  return <section className="student-radar" aria-label="整体轮廓"><Title level={5}>整体轮廓</Title>
+    <Space wrap className="radar-legend"><span>{label}实线</span>{hasClass && <span className="radar-class">班级参照虚线</span>}</Space>
+    {axes.length >= 3 && axes.length <= 8 && <svg className="profile-radar-svg" viewBox="0 0 360 300" role="img" aria-label={label + '学习表现雷达图'}>
+      {[25, 50, 75, 100].map(scale => <polygon key={scale} points={axes.map((_, i) => point(i, scale).join(',')).join(' ')} fill="none" stroke="var(--line)" />)}
+      {axes.map((axis, i) => { const [x, y] = point(i, 100), [tx, ty] = point(i, 120); return <g key={axis.id}>
+        <line x1={180} y1={150} x2={x} y2={y} stroke="var(--line)" />
+        <text x={tx} y={ty} textAnchor="middle" fill="currentColor" fontSize="12">{axis.id}</text>
+      </g> })}
+      {render(axes.map(a => a.score), false)}{hasClass && render(axes.map(a => map.get(a.id)), true)}
+    </svg>}
+    <div className="radar-values">{axes.map(a => <div key={a.id}>
+      <Button type="link" onClick={() => onSelect(a)}>{a.id} · {a.label}</Button>
+      <span>{a.score == null ? '无有效评分' : a.score + '%'}{hasClass && ' / 班级 ' + (map.get(a.id) == null ? '无有效评分' : map.get(a.id) + '%')}</span>
+      {(axes.length < 3 || axes.length > 8) && a.score != null && <meter aria-label={a.label} min={0} max={100} value={a.score} />}
+    </div>)}</div>
   </section>
 }
 
@@ -186,7 +162,7 @@ function Workbench() {
   const [node, setNode] = useState('')
   const [topic, setTopic] = useState('')
   const [jobs, setJobs] = useState<Row[]>([])
-  const [showArchived, setShowArchived] = useState(false)
+
   const [followUpVersion, setFollowUpVersion] = useState(0)
   const [materials, setMaterials] = useState<Row[]>([])
   const [curriculum, setCurriculum] = useState<Row>({})
@@ -200,6 +176,7 @@ function Workbench() {
   const [correction, setCorrection] = useState<Row>()
   const [corrected, setCorrected] = useState('{}')
   const [mapping, setMapping] = useState('{}')
+  const [mappingTiming, setMappingTiming] = useState<{start:number; end?:number}>()
   const [suggestedMapping, setSuggestedMapping] = useState<{ source: string; files: File[]; values: Record<string, string> }>()
   const [selected, setSelected] = useState<Row>()
   const [answerId, setAnswerId] = useState('')
@@ -211,6 +188,7 @@ function Workbench() {
   const [lookup, setLookup] = useState('')
   const [hits, setHits] = useState<Row[]>([])
   const [draft, setDraft] = useState<Row>()
+  const [newAdvice, setNewAdvice] = useState<Row>()
   const [bindingStudent, setBindingStudent] = useState('')
   const [bindingLabel, setBindingLabel] = useState('')
   const [binding, setBinding] = useState({ label: '', webhook: '', secret: '' })
@@ -229,14 +207,14 @@ function Workbench() {
   const goTo = (next: string) => {
     if (next === 'run') return
     const fromModels = location.hash === '#models'
-    if (location.hash) history.replaceState(null, '', location.pathname + location.search + (next === 'chat' ? '' : '#' + next))
+    history.replaceState(null, '', location.pathname + location.search + (next === 'chat' ? '' : '#' + next))
     setPage(next)
     if (next === 'settings' && fromModels) {
       requestAnimationFrame(() => document.getElementById('model-access')?.scrollIntoView({ block: 'start' }))
     }
   }
   const openRun = (id: string) => {
-    if (!id) { goTo('settings'); return }
+    if (!id) { setRunId(''); goTo('tasks'); return }
     location.hash = 'agent/' + id
     setRunId(id)
     setPage('run')
@@ -439,10 +417,12 @@ function Workbench() {
     { label: '学生', options: students.map(s => ({ value: 'student:' + s.学生编号, label: s.学生编号 + ' · ' + s.模拟班级编号 })) },
   ]
   const confirmClean = (detail: Row) => perform(async () => {
-    await api('/imports/' + detail.payload.batch_id + '/confirm' + query({ run_id: detail.id }), post)
+    const result = await api('/imports/' + detail.payload.batch_id + '/confirm' + query({ run_id: detail.id }), post)
     setRunDetail(await api('/agent/runs/' + detail.id))
     await refresh()
     message.success('已核对并启用这批数据')
+    if (result.recommendation_run_id) openRun(result.recommendation_run_id)
+    if (result.continuation_error) message.warning('未自动生成建议：' + result.continuation_error)
   })
   const navExpanded = mobile ? mobileOpen : !rail
   const navAction = navExpanded ? '收起导航' : '展开导航'
@@ -467,14 +447,14 @@ function Workbench() {
             goTo(key)
             if (mobile) { setMobileOpen(false); navToggle.current?.focus() }
           }}>
-            <NavIcon name={key} /><span>{label}</span>
+            <NavIcon name={key === 'tasks' ? 'agent' : key} /><span>{label}</span>
           </button>
         </Tooltip>)}
       </nav>
     </Layout.Sider>
     <Layout.Content className="content">
       {page !== 'overview' && page !== 'chat' && <header className="page-head"><Title level={2}>{page === 'run' ? '任务详情' : pages.find(p => p[0] === page)?.[1]}</Title>
-        {page === 'run' && <Button onClick={() => goTo('settings')}>返回设置中的任务记录</Button>}</header>}
+        {page === 'run' && <Button onClick={() => openRun('')}>返回任务中心</Button>}</header>}
       <Diagnostics active={page === 'overview'} data={data.groups && (!activeSnapshot || activeSnapshot === data.snapshot_id) ? data as Profile : undefined}
         count={students.length} attempts={report?.valid_scored} busy={busy} api={api}
         openImport={() => goTo('import')} openEvidence={target => void readEvidence(target)}
@@ -492,25 +472,22 @@ function Workbench() {
           openPage={goTo}
           onTaskStarted={() => { void refresh() }} />
       </div>
-      {page === 'run' && <AgentWorkbench key={runId} api={api} openSettings={() => goTo('settings')}
-        jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={runId}
+      {(page === 'run' || page === 'tasks') && <AgentWorkbench key={page === 'run' ? runId : 'tasks'} api={api} openSettings={() => goTo('settings')} openMaterials={() => goTo('materials')}
+        jobs={jobs} detail={runDetail?.id === runId ? runDetail : undefined} runId={page === 'run' ? runId : ''}
         caseAvailable={caseAvailable}
         error={runError} loading={busy} legacy={!!report?.legacy_pending}
         open={openRun} openImport={() => goTo('import')}
         openReplay={openReplay}
         openDraft={key => { const found = drafts.find(d => d.id === key); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
         migrate={() => perform(async () => { openRun((await api('/imports/migrate', post)).run_id) })}
-        retry={() => perform(async () => { setRunDetail(await api('/jobs/' + runId + '/retry', post)) })}
+        retry={() => perform(async () => { const result = await api('/jobs/' + runId + '/retry', post); if (result.id !== runId) openRun(result.id); else setRunDetail(result) })}
         control={action => perform(async () => {
           await api('/jobs/' + runId + '/control/' + action, post)
           setRunDetail(await api('/agent/runs/' + runId))
           await refresh()
         })}
         rebase={() => perform(async () => { openRun((await api('/imports/' + runDetail?.payload.batch_id + '/rebase', post)).run_id) })}
-        confirm={() => perform(async () => {
-          await api('/imports/' + runDetail?.payload.batch_id + '/confirm' + query({ run_id: runId }), post)
-          setRunDetail(await api('/agent/runs/' + runId)); await refresh(); message.success('已启用快照')
-        })} />}
+        confirm={() => { if (runDetail) void confirmClean(runDetail) }} />}
       {page === 'import' && <>
         <Card title="当前步骤" extra={latestClean && <Button onClick={() => openRun(latestClean.id)}>查看任务详情</Button>}>
           <Steps current={latestClean?.state === 'failed' ? 1 : cleanDetail?.stage === 'confirm' && cleanDetail.state === 'done' ? 2 :
@@ -523,7 +500,7 @@ function Workbench() {
                 description={<CleaningCounts report={cleanDetail.report as Parameters<typeof CleaningCounts>[0]['report']} />}
                 action={<Button type="primary" loading={busy} onClick={() => confirmClean(cleanDetail)}>核对并确认本批数据</Button>} />
               : latestClean && ['queued', 'running'].includes(latestClean.state) ? <Alert type="info" title={latestClean.state === 'running'
-                ? <ActiveStatus label="本批数据正在清洗或复核" /> : '本批数据正在排队'}
+                ? <ActiveStatus label="本批数据正在清洗或复核" started={latestClean.stage_timings?.[latestClean.stage]?.started_at ? latestClean.stage_timings[latestClean.stage].started_at * 1000 : undefined} /> : '本批数据正在排队'}
                 description="可以查看真实计数、异常和复核状态。" action={<Button onClick={() => openRun(latestClean.id)}>查看本批进度</Button>} />
               : report?.snapshot_id ? <Space wrap><Tag color="success">已确认快照</Tag>
                 <Button type="primary" onClick={() => goTo('chat')}>回到对话，问第一个问题</Button>
@@ -555,10 +532,14 @@ function Workbench() {
               const payload = new FormData()
               for (const file of files) payload.append('files', file)
               payload.append('mapping', mapping)
+              const start = Date.now()
+              setMappingTiming({start})
               const result = await api('/imports/suggest-mapping', { method: 'POST', body: payload })
+                .finally(() => setMappingTiming({start, end:Date.now()}))
               if (!Object.keys(result.mapping).length) message.info('没有找到明确的列映射，请手动填写')
               setSuggestedMapping({ source: mapping, files, values: result.mapping })
             })}>建议列映射</Button>}
+          {mappingTiming && (mappingTiming.end ? <small>列映射检查耗时 {((mappingTiming.end - mappingTiming.start) / 1000).toFixed(1)} 秒</small> : <ActiveStatus started={mappingTiming.start} label="等待列映射建议" />)}
           {suggestedMapping?.source === mapping && suggestedMapping.files === files && !!Object.keys(suggestedMapping.values).length &&
             <Alert className="spaced" type="info" title="请核对建议列映射"
               description={Object.entries(suggestedMapping.values).map(([from, to]) => from + ' → ' + to).join('、')}
@@ -570,7 +551,7 @@ function Workbench() {
           <Paragraph type="secondary" className="spaced">可上传 XLSX 工作簿或成组 CSV，也支持名册和总分。缺少文件时，清洗报告会列出无法关联的原始行。</Paragraph>
         </Card>
         {report?.legacy_pending && <Alert type="info" title="已有历史批次，需迁移为快照后启用"
-          action={<Button onClick={() => goTo('settings')}>打开任务记录</Button>} />}
+          action={<Button onClick={() => goTo('tasks')}>打开任务记录</Button>} />}
         {report && <Card title="清洗计数"><CleaningCounts report={report as Parameters<typeof CleaningCounts>[0]['report']} /></Card>}
         {cleaningAudit?.trace?.length > 0 && <Card title="Agent 清洗记录">
           <ReviewPanel review={cleaningAudit} collapseDetails={cleaningAudit.decision === 'ready'} />
@@ -642,16 +623,16 @@ function Workbench() {
             {student && <StudentFollowUps key={student + ":" + followUpVersion} api={api} student={student} snapshot={activeSnapshot} />}
             {!!student && !!current.totals?.length && <Table rowKey="节点编号" dataSource={current.totals} pagination={false} columns={[{ title: '测验', dataIndex: '节点编号' }, { title: '总分', dataIndex: '测验总分' }]} />}
             {!!data.snapshot_id && <Space wrap className="spaced">
-              <Button type="primary" loading={busy} onClick={() => launch({ student, group: profileGroup, node, snapshot_id: data.snapshot_id })}>
+              <Button type="primary" loading={busy} onClick={() => setNewAdvice({ student, group: profileGroup, node })}>
                 {student ? '生成学习建议' : '生成班级建议'}
               </Button>
-              {student && <Button loading={busy} onClick={() => launch({ student, node, variant: true, snapshot_id: data.snapshot_id })}>生成建议与变式题</Button>}
+              {student && <Button loading={busy} onClick={() => setNewAdvice({ student, node, variant:true })}>生成建议与变式题</Button>}
             </Space>}
           </>}
         </Card>
       </>}
       {page === 'drafts' && <>
-        <Card title="学习建议" extra={<Button disabled={!report?.snapshot_id} href="/api/export?formal=true">导出已确认成果</Button>}><Table rowKey="id" dataSource={drafts} columns={[
+        <Card title="学习建议" extra={<Space wrap><Button type="primary" onClick={() => setNewAdvice({})}>新建建议</Button><Button disabled={!report?.snapshot_id} href="/api/export?formal=true">导出已确认成果</Button></Space>}><Table rowKey="id" dataSource={drafts} columns={[
           { title: '对象', render: (_, d) => d.student || d.group }, { title: '测验', render: (_, d) => d.node || '全部' },
           { title: '学情概述', render: (_, d) => <><div>{summaryLine(d.observation)}</div>
             <Text type="secondary">{summaryLine(d.exercises?.[0]?.purpose || d.message || d.follow_up)}</Text></> }, { title: '状态', render: (_, d) => !d.snapshot_id ? '历史记录 · 版本未登记' : d.approved ? '已确认' : ({ pass: '待确认', revise: '已退回', pending: '待终审' } as Row)[d.review_state] },
@@ -663,14 +644,7 @@ function Workbench() {
         <Card id="model-access" title="模型接入">
           <ModelAccessPage access={modelAccess} api={api} update={setModelAccess} />
         </Card>
-        <Card title="后台任务" extra={<Button onClick={() => setShowArchived(value => !value)}>{showArchived ? "查看未归档" : "查看已归档"}</Button>}>
-          <Table<Row> rowKey="id" dataSource={jobs.filter(item => !!item.archived === showArchived)} columns={[{ title: '类型', render: (_,j) => ({ extract:'解析资料', publish:'建立索引', ...runNames } as Row)[j.kind] || j.kind },
-            { title: '对象', render: (_,j) => j.payload?.label || j.payload?.student || j.payload?.group || '' },
-            { title: '状态', render: (_,j) => <Tag color={j.state === 'failed' ? 'error' : j.state === 'done' ? 'success' : 'processing'}>{({ queued:'排队', running:'处理中', done:'完成', failed:'失败', stopped:'已停止' } as Row)[j.state]}</Tag> },
-            { title: '错误', dataIndex: 'error' },
-            { title: '', render: (_,j) => <Space wrap>{['clean', 'generate', 'recommendation_review'].includes(j.kind) && <Button onClick={() => openRun(j.id)}>查看运行</Button>}
-              {j.state === 'failed' && <Button onClick={() => perform(() => api('/jobs/' + j.id + '/retry', post))}>重试</Button>}</Space> }]} />
-        </Card>
+        <Card title="任务中心"><Button onClick={() => goTo('tasks')}>打开任务中心</Button></Card>
         <Card title="运行环境"><Space wrap>
           <Tag color={health.model_configured ? 'success' : 'warning'}>模型 {health.model_configured ? '已配置' : '待配置'}</Tag>
           <Tag color={health.ocr_configured ? 'success' : 'warning'}>PaddleOCR {health.ocr_configured ? '已配置' : '待安装'}</Tag>
@@ -680,6 +654,21 @@ function Workbench() {
         <Card title="使用引导"><Button onClick={() => goTo('import')}>查看数据导入步骤</Button></Card>
       </>}
     </Layout.Content>
+    <Drawer open={!!newAdvice} title="新建学习建议" onClose={() => setNewAdvice(undefined)}>
+      {newAdvice && <Space direction="vertical" style={{ width: '100%' }}>
+        {!report?.snapshot_id && <Alert type="info" title="请先导入并确认学情数据" action={<Button onClick={() => { setNewAdvice(undefined); goTo('import') }}>去导入</Button>} />}
+        <Select aria-label="建议对象" placeholder="选择学生或班级" showSearch style={{ width: '100%' }}
+          value={newAdvice.student ? 'student:' + newAdvice.student : newAdvice.group ? 'group:' + newAdvice.group : undefined}
+          options={[{label:'学生',options:students.map(r => ({value:'student:'+r.学生编号,label:r.学生编号}))},
+            {label:'班级',options:groups.map(r => ({value:'group:'+r.group,label:r.group}))}]}
+          onChange={key => { const [kind, ...id] = key.split(':'); setNewAdvice({ ...newAdvice, student:'', group:'', [kind]:id.join(':'), variant:false }) }} />
+        <Select aria-label="建议测验" placeholder="全部测验" allowClear style={{ width: '100%' }} value={newAdvice.node}
+          options={(data.nodes || []).map((id:string) => ({value:id,label:id}))} onChange={node => setNewAdvice({ ...newAdvice,node })} />
+        {newAdvice.student && <label><input type="checkbox" checked={!!newAdvice.variant} onChange={e => setNewAdvice({...newAdvice,variant:e.target.checked})} /> 同时生成变式题</label>}
+        <Button type="primary" loading={busy} disabled={!report?.snapshot_id || !(newAdvice.student || newAdvice.group)}
+          onClick={() => void launch({...newAdvice,snapshot_id: report?.snapshot_id}, () => setNewAdvice(undefined))}>开始生成</Button>
+      </Space>}
+    </Drawer>
     <Drawer open={!!replay} title="演示串讲 · Q015" size="min(1100px, 100vw)" onClose={() => setReplay(undefined)}
       styles={{ body: { display: 'flex', flexDirection: 'column', overflow: 'hidden' } }}>
       {replay && <CaseReplay data={replay} openCitation={setCitation} />}

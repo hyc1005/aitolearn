@@ -277,7 +277,7 @@ def save_session(conn, session_id, request, result):
     turn = {"question": request.question, "answer": result.get("answer", ""), "parts": result.get("parts", []),
             "trace": result.get("trace", []), "mode": result.get("mode"), "context": context,
             "cards": result.get("cards", []), "snapshot_id": result.get("snapshot_id", ""),
-            "model": result.get("model", ""), "model_call": result.get("model_call"), "at": now}
+            "model": result.get("model", ""), "model_call": result.get("model_call"), "elapsed_ms": result.get("elapsed_ms"), "at": now}
     session["turns"] = (session.get("turns", []) + [turn])[-MAX_TURNS:]
     session["context"] = context
     if result.get("selection"):

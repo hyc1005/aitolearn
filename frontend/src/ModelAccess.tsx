@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Alert, Button, Input, Select, Space } from 'antd'
+import { ActiveStatus } from './ActiveStatus'
 
 export type ModelChoice = { connection_id: string; model_id: string; effort: string; connection_name?: string }
 export type ModelEntry = { id: string; enabled: boolean; mode: string; efforts: string[]; verified: string[]; legacy?: boolean }
@@ -45,14 +46,15 @@ function ConnectionEditor({ connection: c, access, api, update, select, notice }
   const [name, setName] = useState(c?.name || '')
   const [address, setAddress] = useState(c?.base_url || '')
   const [key, setKey] = useState('')
-  const [filter, setFilter] = useState('')
+  const [focused, setFocused] = useState<string>()
   const [manual, setManual] = useState('')
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<{ error: boolean; text: string }>()
+  const [testTiming,setTestTiming] = useState<{start:number; end?:number}>()
   const [probe, setProbe] = useState<Record<string, string>>({})
   const [cap, setCap] = useState<Record<string, { mode: string; efforts: string[] }>>({})
   const path = '/models/connections/' + (c?.id || 'new')
-  const ids = [...new Set([...(c?.models.map(m => m.id) || []), ...(c?.catalog || [])])].filter(id => id.toLowerCase().includes(filter.trim().toLowerCase()))
+  const ids = [...new Set([...(c?.models.map(m => m.id) || []), ...(c?.catalog || [])])]
   async function action(work: () => Promise<void>, ok: string) {
     setBusy(true); setFeedback(undefined); notice('')
     try { await work(); setFeedback({ error: false, text: ok }) }
@@ -81,12 +83,29 @@ function ConnectionEditor({ connection: c, access, api, update, select, notice }
       <Space wrap><Button type="primary" htmlType="submit" disabled={busy}>保存连接</Button>
         {c && <Button disabled={busy || !c.configured} onClick={() => void action(async () => update(await api(path + '/catalog', { method: 'POST' })), '目录已刷新')}>刷新目录</Button>}</Space>
     </form>
+    {testTiming && (testTiming.end ? <small>模型测试耗时 {((testTiming.end-testTiming.start)/1000).toFixed(1)} 秒</small> : <ActiveStatus label="等待模型测试" started={testTiming.start} />)}
     {feedback && <Alert type={feedback.error ? 'warning' : 'success'} title={feedback.text} showIcon />}
     {c && <fieldset disabled={busy} className="connection-models"><legend>模型目录和聊天清单</legend>
-      <Input aria-label="搜索模型目录" placeholder="搜索模型" value={filter} onChange={e => setFilter(e.target.value)} />
+      <small>已启用 {c.models.filter(m => m.enabled).length} 个 · 默认 {access.default?.model_id || '未设置'}</small>
+      <Select aria-label="启用多个聊天模型" mode="multiple" maxTagCount={2} listHeight={260} showSearch={{ optionFilterProp:'label' }}
+        disabled={busy} value={c.models.filter(m=>m.enabled).map(m=>m.id)}
+        options={ids.map(id=>({value:id,label:id}))}
+        onChange={next=>void action(async ()=>{
+          for (const id of ids.filter(id=>next.includes(id) !== c.models.some(m=>m.id === id && m.enabled))) {
+            const m = c.models.find(entry=>entry.id === id)
+            await saveModel(id,next.includes(id),m?.mode,m?.efforts.filter(e=>!['default','off','on'].includes(e)))
+            setFocused(id)
+          }
+        },'聊天清单已保存；尚未通过默认档测试的模型不会出现在聊天菜单')} />
+      <Select aria-label="搜索模型目录" placeholder="搜索并选择模型" showSearch={{ optionFilterProp:'label' }} listHeight={260}
+        value={focused} onChange={setFocused} options={[
+        {label:'已启用',options:ids.filter(id => c.models.some(m => m.id === id && m.enabled)).map(id => ({value:id,label:id}))},
+        {label:'已登记',options:ids.filter(id => c.models.some(m => m.id === id && !m.enabled)).map(id => ({value:id,label:id}))},
+        {label:'其他目录模型',options:ids.filter(id => !c.models.some(m => m.id === id)).map(id => ({value:id,label:id}))},
+      ]} />
       <Space wrap><Input aria-label="手动登记模型 ID" placeholder="手动填写模型 ID" value={manual} onChange={e => setManual(e.target.value)} />
-        <Button disabled={busy || !manual.trim() || c.models.some(m => m.id === manual.trim())} onClick={() => void action(async () => { await saveModel(manual.trim(), false); setFilter(''); setManual('') }, '模型已登记，请测试后勾选使用')}>登记</Button></Space>
-      {ids.map(id => {
+        <Button disabled={busy || !manual.trim() || c.models.some(m => m.id === manual.trim())} onClick={() => void action(async () => { await saveModel(manual.trim(), false); setFocused(manual.trim()); setManual('') }, '模型已登记，请测试后勾选使用')}>登记</Button></Space>
+      {ids.filter(id => id === focused).map(id => {
         const m = c.models.find(entry => entry.id === id)
         const modes = cap[id] || { mode: m?.mode || 'unknown', efforts: m?.efforts.filter(e => e !== 'default') || [] }
         const current = m?.efforts.includes(probe[id]) ? probe[id] : 'default'
@@ -105,7 +124,11 @@ function ConnectionEditor({ connection: c, access, api, update, select, notice }
             </Space>}
             <Space wrap>
               <Select aria-label={`${id} 测试强度`} value={current} options={m.efforts.map(value => ({ value, label: effortLabel[value] }))} onChange={effort => setProbe({ ...probe, [id]: effort })} />
-              <Button size="small" disabled={busy || !c.configured} onClick={() => void action(async () => update(await api(path + '/test', json('POST', { model_id: id, effort: current }))), `${id} / ${effortLabel[current]}：聊天测试通过`)}>测试</Button>
+              <Button size="small" disabled={busy || !c.configured} onClick={() => void action(async () => {
+                const start=Date.now(); setTestTiming({start})
+                try { update(await api(path + '/test', json('POST', { model_id:id,effort:current }))) }
+                finally { setTestTiming({start,end:Date.now()}) }
+              }, `${id} / ${effortLabel[current]}：聊天测试通过`)}>测试</Button>
               <Button size="small" disabled={busy || !m.enabled || !m.verified.includes('default') || isDefault} onClick={() => void action(async () => update(await api('/models/chat-default/' + c.id, json('PUT', { model_id: id }))), '新会话默认模型已保存')}>{isDefault ? '新会话默认' : '设为默认'}</Button>
             </Space>
           </>}

@@ -5,7 +5,7 @@ from .materials import process
 from .model_transport import model_failure, model_job
 from .search import optional_encode
 from .store import all_of, db, get, put
-from .workflow import JobStopped, review_recommendation, run_cleaning, run_recommendation
+from .workflow import JobStopped, checkpoint, review_recommendation, run_cleaning, run_recommendation
 
 
 def run():
@@ -29,6 +29,8 @@ def run():
             continue
         token = model_job.set(job)
         try:
+            if job["kind"] in {"extract", "publish"}:
+                checkpoint(job, job["kind"])
             if job["kind"] == "extract":
                 with db() as conn:
                     doc = get(conn, "material", job["payload"]["material"])
@@ -63,6 +65,8 @@ def run():
                 review_recommendation(job, job["payload"]["draft"], job["payload"]["revision"])
             else:
                 raise ValueError("未知任务类型")
+            if job["kind"] in {"extract", "publish"}:
+                checkpoint(job, job["kind"], job["result"])
             job["state"] = "done"
         except JobStopped:
             job["state"] = "stopped"
@@ -79,7 +83,13 @@ def run():
             job.setdefault("failures", []).append({"stage": job.get("stage"),
                                                    "error": job["error"], "at": time.time(),
                                                    "code": job.get("model_error"),
+                                                   "detail": failure.detail if failure else "",
                                                    "request": job.get("last_model_request")})
+            timing = job.get("stage_timings", {}).get(job.get("stage"))
+            if timing:
+                timing["elapsed_ms"] = max(0, round((time.time() - timing["started_at"]) * 1000))
+            logging.warning("job_failure run=%s stage=%s code=%s detail=%s", job["id"],
+                            job.get("stage"), job.get("model_error"), failure.detail if failure else type(exc).__name__)
         finally:
             model_job.reset(token)
             job["model_retrying"] = False

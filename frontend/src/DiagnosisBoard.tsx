@@ -52,6 +52,7 @@ export function DiagnosisBoard({ runId, api }: { runId: string; api: Api }) {
   const [item, setItem] = useState('')
   const [page, setPage] = useState(0)
   const [sort, setSort] = useState('topic')
+  const [topicOpen, setTopicOpen] = useState('')
   const [answer, setAnswer] = useState<Answer>()
   const [answerError, setAnswerError] = useState('')
   useEffect(() => {
@@ -104,10 +105,17 @@ export function DiagnosisBoard({ runId, api }: { runId: string; api: Api }) {
         { value: 'topic', label: '按主题分组' }, { value: 'score', label: '按得分排序' },
       ]} />
     </div>
+    <p>主题均值按有效指标等权平均，真实零分计入，缺失不计。</p>
     <div className="diagnosis-scale"><span>0%</span><span>50% 参考线</span><span>100%</span></div>
     {visibleAxes.map(group => <section key={group.name}>
-      {group.name && <h4>{group.name}</h4>}
-      {group.rows.map(axis => <button type="button" className="diagnosis-bar-row" key={axis.id}
+      {group.name && (() => {
+        const scored = group.rows.filter(a => a.score != null)
+        const mean = scored.length ? (scored.reduce((s, a) => s + a.score!, 0) / scored.length).toFixed(1) + '%' : '无有效评分'
+        return <button type="button" className="diagnosis-topic" aria-expanded={topicOpen === group.name} onClick={() => setTopicOpen(topicOpen === group.name ? '' : group.name)}>
+          <strong>{group.name}</strong><span>{topicOpen !== group.name && `指标均值 ${mean} · ${scored.length}/${group.rows.length} 项有效 · `}{topicOpen === group.name ? '▴' : '▾'}</span>
+        </button>
+      })()}
+      {(!group.name || topicOpen === group.name) && group.rows.map(axis => <button type="button" className="diagnosis-bar-row" key={axis.id}
         data-priority={axis.id === weak?.id ? 'review' : axis.id === strong?.id ? 'strength' : undefined}
         aria-pressed={selected?.id === axis.id} onClick={() => selectAxis(axis.id)}>
         <span><strong>{axis.id}</strong> {axis.label}</span>

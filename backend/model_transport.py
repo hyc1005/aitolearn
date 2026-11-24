@@ -34,8 +34,9 @@ MESSAGES = {
 
 
 class ModelRequestError(ValueError):
-    def __init__(self, code):
+    def __init__(self, code, detail=""):
         self.code = code
+        self.detail = detail
         super().__init__(MESSAGES[code])
 
 
@@ -87,6 +88,10 @@ class ModelTransport(httpx.BaseTransport):
     def handle_request(self, request):
         job = model_job.get()
         size = len(request.content)
+        try:
+            limit = json.loads(request.content).get("max_tokens")
+        except (ValueError, TypeError, AttributeError):
+            limit = None
         for retry in range(2):
             started = time.monotonic()
             response = None
@@ -115,6 +120,7 @@ class ModelTransport(httpx.BaseTransport):
                 "run_id": job["id"] if job else self.session,
                 "stage": job.get("stage") if job else self.stage,
                 "provider": self.provider, "model": self.model, "bytes": size,
+                "max_tokens": limit if type(limit) is int else None,
                 "elapsed_ms": round((time.monotonic() - started) * 1000), "retry": retry,
                 "status": response.status_code if response is not None else None, "result": code or "ok",
                 "request_id": response.headers.get("x-request-id", "")[:96] if response is not None else "",
@@ -122,6 +128,11 @@ class ModelTransport(httpx.BaseTransport):
             }
             if job is not None:
                 job["last_model_request"] = metadata
+                stage = job.get("stage_timings", {}).get(job.get("stage"))
+                if stage is not None:
+                    stage["model_ms"] = stage.get("model_ms", 0) + metadata["elapsed_ms"]
+                    stage["model_requests"] = stage.get("model_requests", 0) + 1
+                    stage["retries"] = stage.get("retries", 0) + retry
             logger.info("model_request %s", json.dumps(metadata, ensure_ascii=False))
             delay = retry_delay(response)
             if not retry and code in {"connection", "timeout", "rate_limit", "upstream"} and delay <= 5:

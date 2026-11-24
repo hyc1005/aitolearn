@@ -44,8 +44,12 @@ def structured_review(schema, instruction, facts, session):
         raise ModelRequestError("json") from None
     try:
         return schema.model_validate(value), model.model_id
-    except ValidationError:
-        raise ModelRequestError("schema") from None
+    except ValidationError as error:
+        fields = schema.model_fields
+        paths = [".".join(str(part) for part in entry["loc"]
+                          if isinstance(part, int) or part in fields or part in {"detail", "refs"})
+                 + " (" + entry["type"] + ")" for entry in error.errors(include_input=False)[:5]]
+        raise ModelRequestError("schema", "字段校验失败：" + "、".join(paths)) from None
 
 
 def validated_review(schema, instruction, facts, session, valid):
@@ -53,7 +57,7 @@ def validated_review(schema, instruction, facts, session, valid):
         try:
             result, model = structured_review(schema, instruction, facts, f"{session}-{attempt}")
             if not valid(result):
-                raise ModelRequestError("reference")
+                raise ModelRequestError("reference", "引用不在本次允许列表，或必要的核对事项为空")
             return result, model
         except ModelRequestError as error:
             if attempt or error.code not in {"json", "schema", "reference"}:

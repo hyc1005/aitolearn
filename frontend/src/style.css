@@ -338,6 +338,15 @@ small { font-size: var(--type-small); }
 .chat-menu-options { position: absolute; z-index: 4; bottom: 100%; right: 0; background: var(--paper); box-shadow: 0 3px 16px #0003; padding: 4px; width: max-content; max-width: min(70vw, 340px); max-height: 40vh; overflow: auto; }
 .chat-menu-options button { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; }
 .connection-models, .connection-model { display: grid; gap: 8px; }
+.task-stage-nav, .review-sections, .radar-values { display: flex; gap: 10px; flex-wrap: wrap; }
+.review-sections { flex-direction: column; margin-top: 12px; }
+.review-sections > section, .attachment-row, .task-diagnostics { padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.review-sections h4, .attachment-row p { margin: 0 0 6px; }
+.diagnosis-topic { width: 100%; padding: 12px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; color: inherit; text-align: start; background: var(--surface); border: 1px solid var(--line); cursor: pointer; }
+.profile-radar-svg { display: block; width: 100%; max-width: 480px; margin-inline: auto; }
+.radar-values { flex-direction: column; }
+.radar-values > div { display: flex; align-items: baseline; flex-wrap: wrap; }
+.model-duration { margin-inline-start: 8px; color: var(--muted); }
 .connection-model { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .chat-submit .chat-send { inline-size: 44px; block-size: 44px; flex: 0 0 44px; padding: 0; }
 .chat-history { display: grid; max-width: min(80vw, 340px); max-height: 50vh; overflow-y: auto; }

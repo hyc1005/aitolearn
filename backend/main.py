@@ -5,6 +5,7 @@ import hmac
 import io
 import json
 import time
+from zipfile import BadZipFile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 
 from .agent import api_key
+from .attachments import MATERIALS, archive_is_small, excerpt, material_signature
 from .chat_agent import run_chat
 from .cleaning_agent import structured_review
 from .conversation import (CORRECTION_FIELDS, cleaning_card, deterministic, latest_clean, make_proposal, material_version, onboarding,
@@ -139,6 +141,7 @@ def test_model_connection(provider: str):
 
 @app.post("/api/learning-chat")
 def learning_chat(request: ChatRequest):
+    started = time.monotonic()
     if not request.question.strip() or any(isinstance(turn, str) and len(turn) > 1200 for turn in request.history):
         raise HTTPException(422, "请输入问题，单条最多 1200 字")
     with db() as conn:
@@ -165,7 +168,7 @@ def learning_chat(request: ChatRequest):
         if not selected and request.provider and (provider not in PROVIDERS or not provider_key(provider)):
             raise HTTPException(422, "请选择已配置的模型")
         request.provider = provider if request.provider or (session or {}).get("provider") else None
-        result = answer_progress(conn, snapshot, request)
+        result = None if request.attachments else answer_progress(conn, snapshot, request)
     called = False
     mode = "data" if result else "buttons"
     if result is None and request.use_tools and (selected or (not request.use_configured_models and provider in PROVIDERS and provider_key(provider))):
@@ -179,7 +182,7 @@ def learning_chat(request: ChatRequest):
             raise HTTPException(502, str(error)) from None
     if result is None:
         with db() as conn:
-            result = deterministic(conn, request, snapshot)
+            result = None if request.attachments else deterministic(conn, request, snapshot)
         if result is None:
             if request.use_configured_models and not selected:
                 raise HTTPException(422, "请先在设置中勾选并测试一个聊天模型")
@@ -211,6 +214,8 @@ def learning_chat(request: ChatRequest):
     result.setdefault("cards", [])
     result["snapshot_id"] = request.snapshot_id
     result["mode"] = mode
+    if called:
+        result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
     if selected:
         result["selection"] = selected.metadata()
         if called:
@@ -432,8 +437,8 @@ def jobs():
 def run_detail(key: str):
     with db() as conn:
         run = require(conn, "job", key)
-        if run["kind"] not in {"clean", "generate", "recommendation_review"}:
-            raise HTTPException(404, "Agent 运行不存在")
+        if run["kind"] not in {"clean", "generate", "recommendation_review", "extract", "publish"}:
+            raise HTTPException(404, "任务不存在")
         stages = run.get("stages", {})
         if run["kind"] == "clean" and "python" in stages:
             snapshot = require(conn, "snapshot", stages["python"]["snapshot_id"])
@@ -598,6 +603,8 @@ async def inspect_import(files, mapping):
         raw = await read_upload(file)
         info = {"name": name, "tables": {}, "status": "ready", "message": ""}
         try:
+            if name.lower().endswith(".xlsx") and not archive_is_small(raw):
+                raise ValueError("工作簿超过安全解压上限")
             if name.lower().endswith(".csv"):
                 try:
                     contents = raw.decode("utf-8-sig")
@@ -617,11 +624,38 @@ async def inspect_import(files, mapping):
             rows = read_file(name, raw, columns)
             for row in rows:
                 info["tables"][row["table"]] = info["tables"].get(row["table"], 0) + 1
-        except (ValueError, OSError, UnicodeError, csv.Error) as error:
+        except (ValueError, OSError, UnicodeError, csv.Error, BadZipFile) as error:
             info.update(status="error", message=str(error))
             rows = []
         inspected.append((info, raw, rows))
     return inspected
+
+
+@app.post("/api/chat/attachments/inspect")
+async def inspect_attachment(file: UploadFile = File(...), reference: bool = Form(False),
+                             mapping: str = Form("{}")):
+    name = Path(file.filename or "").name[:180]
+    raw = await read_upload(file)
+    suffix = Path(name).suffix.lower()
+    if reference:
+        try:
+            text = await run_in_threadpool(excerpt, name, raw)
+        except Exception:  # Uploaded documents can fail in several parser libraries.
+            text = ""
+        return {"name": name, "classification": "reference" if text else "unknown",
+                "excerpt": text, "reason": "本轮参考摘录，不自动入库" if text else "未能提取文字；扫描件请走资料导入"}
+    try:
+        if suffix in {".xlsx", ".csv"}:
+            if suffix == ".xlsx" and not archive_is_small(raw):
+                return {"name": name, "classification": "unknown", "reason": "工作簿超过安全解压上限"}
+            [(info, _, rows)] = await inspect_import([UploadFile(io.BytesIO(raw), filename=name)], mapping)
+            return {"name": name, "classification": "data" if rows or info["status"] == "skipped" else "unknown",
+                    "reason": info["message"] or "业务表结构与所需列匹配", "tables": info["tables"]}
+        if suffix in MATERIALS and material_signature(suffix, raw):
+            return {"name": name, "classification": "material", "reason": "文档或图像格式匹配；需解析和人工校对后发布"}
+    except (BadZipFile, OSError, ValueError):
+        pass
+    return {"name": name, "classification": "unknown", "reason": "未识别到有效的业务表或教材格式，不会提交"}
 
 
 @app.post("/api/imports/preview")
@@ -665,7 +699,13 @@ async def suggest_import_mapping(files: list[UploadFile] = File(...), mapping: s
 
 @app.post("/api/imports")
 async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}"),
-                chat_session_id: str | None = Form(None)):
+                chat_session_id: str | None = Form(None), continue_target: str = Form("", max_length=180)):
+    continuation = None
+    if continue_target:
+        kind, sep, entity = continue_target.partition(":")
+        if not sep or kind not in {"student", "group"} or not entity:
+            raise HTTPException(422, "请指定续跑建议的学生或班级")
+        continuation = {kind: entity}
     rows, sources, pending, skipped = [], [], [], []
     try:
         inspected = await inspect_import(files, mapping)
@@ -690,7 +730,8 @@ async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}"),
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         batch = {"id": new_id(), "rows": rows, "sources": sources, "mapping": columns,
-                 "label": "、".join(source["name"] for source in sources), "confirmed": False}
+                 "label": "、".join(source["name"] for source in sources), "confirmed": False,
+                 "continuation": continuation}
         run = queue_cleaning(conn, batch)
         result = cleaning_run(run)
         result["skipped"] = skipped
@@ -761,8 +802,14 @@ def confirm_batch(conn, key, run_id):
     student_query.index_snapshot(conn, new_snapshot)
     put(conn, "settings", "active_snapshot", {"id": new_snapshot["id"], "review_run_id": run_id})
     put(conn, "import", key, {**item, "confirmed": True, "snapshot_id": new_snapshot["id"]})
-    put(conn, "job", run_id, {**run, "stage": "published", "confirmed_at": time.time()})
-    return run["result"]
+    result = dict(run["result"])
+    if item.get("continuation"):
+        try:
+            result["recommendation_run_id"] = create_run(conn, Run(**item["continuation"], snapshot_id=new_snapshot["id"]))["id"]
+        except HTTPException as error:
+            result["continuation_error"] = error.detail
+    put(conn, "job", run_id, {**run, "result": result, "stage": "published", "confirmed_at": time.time()})
+    return result
 
 
 @app.post("/api/imports/{key}/confirm")

@@ -17,6 +17,11 @@ def checkpoint(job, stage, result=None):
         if result is None and get(conn, "job_stop", job["id"]):
             raise JobStopped
         job["stage"] = stage
+        timing = job.setdefault("stage_timings", {})
+        if result is None:
+            timing[stage] = {"started_at": time.time(), "attempt": timing.get(stage, {}).get("attempt", 0) + 1}
+        elif stage in timing:
+            timing[stage]["elapsed_ms"] = max(0, round((time.time() - timing[stage]["started_at"]) * 1000))
         if result is not None:
             job.setdefault("stages", {})[stage] = {**result, "recorded_at": time.time(), "run_id": job["id"]}
         put(conn, "job", job["id"], job)

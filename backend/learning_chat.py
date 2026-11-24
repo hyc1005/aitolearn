@@ -18,7 +18,13 @@ class ChatTurn(BaseModel):
     answer: str = Field(default="", max_length=1200)
 
 
+class Attachment(BaseModel):
+    name: str = Field(max_length=180)
+    excerpt: str = Field(max_length=1800)
+
+
 class ChatRequest(BaseModel):
+    attachments: list[Attachment] = Field(default_factory=list, max_length=3)
     question: str = Field(min_length=1, max_length=1200)
     history: list[ChatTurn | str] = Field(default_factory=list, max_length=5)
     snapshot_id: str = Field(default="", max_length=128)
@@ -112,7 +118,8 @@ def reply(request, sources, session, selected=None):
     )
     content = complete(provider, [{"role": "system", "content": system},
                         {"role": "user", "content": json.dumps({
-                            "question": request.question, "history": model_history(request), "sources": evidence
+                            "question": request.question, "history": model_history(request), "sources": evidence,
+                            "attachment_excerpts": request.model_dump(include={"attachments"})["attachments"]
                         }, ensure_ascii=False)}], session, max_tokens=1600)
     return validated_reply(request, sources, evidence, content, provider)
 
