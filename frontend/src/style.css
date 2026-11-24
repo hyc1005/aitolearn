@@ -349,7 +349,29 @@ small { font-size: var(--type-small); }
 .model-duration { margin-inline-start: 8px; color: var(--muted); }
 .connection-model { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .chat-submit .chat-send { inline-size: 44px; block-size: 44px; flex: 0 0 44px; padding: 0; }
-.chat-history { display: grid; max-width: min(80vw, 340px); max-height: 50vh; overflow-y: auto; }
-.chat-history .ant-btn { justify-content: flex-start; white-space: normal; text-align: start; height: auto; }
+.chat-history { display: grid; align-content: start; gap: 4px; width: min(80vw, 400px); max-height: 50vh; overflow-y: auto; }
+.chat-history-row { display: flex; align-items: center; gap: 4px; border-radius: 8px; }
+.chat-history-row[data-current="true"] { background: var(--paper); }
+.chat-history-select { display: flex; flex: 1; min-width: 0; align-items: baseline; gap: 8px; min-height: 42px; padding: 9px; border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: start; cursor: pointer; }
+.chat-history-select:disabled { cursor: default; }
+.chat-history-select:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.chat-history-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-history time, .chat-history-current { flex: none; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.chat-history time, .active-status, .model-duration { font-variant-numeric: tabular-nums; }
+.chat-history-current { color: var(--accent); }
+.chat-history-edit { display: grid; gap: 6px; padding: 6px; }
+.chat-history-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.chat-history-edit-error { margin: 0; color: var(--danger, #b42318); }
+.chat-history-empty { margin: 8px; color: var(--muted); }
+@media (hover: hover) {
+  .chat-history-select:not(:disabled):hover { background: var(--paper); }
+}
+@media (max-width: 800px) {
+  .chat-history { width: 100%; max-height: none; overflow: visible; padding-bottom: env(safe-area-inset-bottom); }
+  .chat-history-select { display: grid; grid-template-columns: minmax(0, 1fr) auto; row-gap: 2px; min-height: 44px; }
+  .chat-history-title { grid-column: 1 / -1; }
+  .chat-history-row > .ant-btn { width: 44px; min-height: 44px; flex: none; }
+  .chat-history-edit .ant-input { font-size: 16px; }
+}
 .issue-frequency { display: grid; grid-template-columns: minmax(100px, 2fr) minmax(50px, 1fr) auto; align-items: center; gap: 10px; }
 .issue-frequency meter { width: 100%; }

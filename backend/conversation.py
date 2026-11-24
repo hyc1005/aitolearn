@@ -255,6 +255,14 @@ def deterministic(conn, request, snapshot):
     return None
 
 
+def session_summary(session):
+    turns = session.get("turns") or []
+    default = session.get("default_title") or (turns[0]["question"][:72] if turns else "未命名会话")
+    return {"id": session["id"], "title": session.get("custom_title") or default,
+            "custom_title": session.get("custom_title"),
+            "last_active_at": session.get("updated") or (turns[-1].get("at") if turns else None) or session.get("created")}
+
+
 def save_session(conn, session_id, request, result):
     now = time.time()
     session = get(conn, "chat_session", session_id) if session_id else None
@@ -278,6 +286,8 @@ def save_session(conn, session_id, request, result):
             "trace": result.get("trace", []), "mode": result.get("mode"), "context": context,
             "cards": result.get("cards", []), "snapshot_id": result.get("snapshot_id", ""),
             "model": result.get("model", ""), "model_call": result.get("model_call"), "elapsed_ms": result.get("elapsed_ms"), "at": now}
+    if not session.get("default_title"):
+        session["default_title"] = (session["turns"][0]["question"] if session.get("turns") else request.question)[:72]
     session["turns"] = (session.get("turns", []) + [turn])[-MAX_TURNS:]
     session["context"] = context
     if result.get("selection"):

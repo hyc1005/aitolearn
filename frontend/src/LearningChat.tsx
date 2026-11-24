@@ -5,6 +5,7 @@ import { ActiveStatus } from './ActiveStatus'
 import { AnswerEvidence, type Answer } from './AnswerEvidence'
 import { effortLabel, json, type Api, type ModelAccess, type ModelChoice } from './ModelAccess'
 import { ChatMenu } from './ChatMenu'
+import { ChatHistory, type SessionSummary } from './ChatHistory'
 import { ChatAttachments, type Reference } from './ChatAttachments'
 
 type Citation = { id: string; title: string; locator: string; material: string; text: string; bbox?: number[] }
@@ -87,7 +88,15 @@ export function LearningChat(props: Props) {
   const [savingChoice, setSavingChoice] = useState(false)
   const [choiceError, setChoiceError] = useState('')
   const [historyOpen, setHistoryOpen] = useState(false)
-  const [sessions, setSessions] = useState<{ id: string; title: string }[]>()
+  const [sessions, setSessions] = useState<SessionSummary[]>()
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyMobile, setHistoryMobile] = useState(() => window.matchMedia('(max-width: 800px)').matches)
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 800px)')
+    const update = () => setHistoryMobile(media.matches)
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [])
   const [historyError, setHistoryError] = useState('')
   const models = (access?.connections || []).filter(c => c.configured).flatMap(c => c.models
     .filter(m => m.enabled && m.verified.includes('default')).map(m => ({ ...m, connection: c, key: JSON.stringify([c.id, m.id]) })))
@@ -149,8 +158,10 @@ export function LearningChat(props: Props) {
     setHistoryOpen(open)
     if (!open) return
     setHistoryError('')
-    try { setSessions(await api('/chat/sessions')) }
+    setHistoryLoading(true)
+    try { setSessions(await api<SessionSummary[]>('/chat/sessions')) }
     catch (error) { setHistoryError((error as Error).message) }
+    finally { setHistoryLoading(false) }
   }
 
   useEffect(() => {
@@ -335,20 +346,27 @@ export function LearningChat(props: Props) {
     if (question) { setDraft(question); write('aitolearn.import.question', '', sessionStorage) }
   }, [props.snapshot])
 
+  const history = <ChatHistory api={api} sessions={sessions} active={sessionId}
+    loading={historyLoading} error={historyError} retry={() => void showHistory(true)}
+    saved={updated => setSessions(old => old?.map(item => item.id === updated.id ? updated : item))}
+    select={id => {
+      setHistoryOpen(false)
+      if (id === sessionId) return
+      setRestoring(true); setDraft(''); setAttachments([]); restoreSession(id)
+    }} />
+  const historyDisabled = busy || restoring || savingChoice
+
   return <section aria-label="学情对话" className={turns.length ? "learning-chat" : "learning-chat chat-is-empty"}>
     <div className="chat-toolbar">
       <Space wrap>
-        <Popover trigger="click" open={historyOpen} onOpenChange={showHistory} content={<div className="chat-history">
-          {historyError && <Alert type="error" title={historyError} />}
-          {!historyError && !sessions && <p>正在读取会话</p>}
-          {sessions?.length === 0 && <p>暂无历史会话</p>}
-          {sessions?.map(session => <Button key={session.id} type="text" disabled={session.id === sessionId}
-            onClick={() => {
-              setHistoryOpen(false); setRestoring(true); setDraft(''); restoreSession(session.id)
-            }}>{session.title}</Button>)}
-        </div>}>
-          <Button disabled={busy || restoring || savingChoice}>最近对话</Button>
-        </Popover>
+        {historyMobile ? <>
+          <Button disabled={historyDisabled} aria-haspopup="dialog" onClick={() => void showHistory(true)}>最近对话</Button>
+          <Drawer open={historyOpen} title="最近对话" placement="bottom" size="min(72dvh, 560px)" onClose={() => setHistoryOpen(false)}>
+            {historyOpen && history}
+          </Drawer>
+        </> : <Popover trigger="click" open={historyOpen} onOpenChange={showHistory} content={history} destroyOnHidden>
+          <Button disabled={historyDisabled} aria-expanded={historyOpen}>最近对话</Button>
+        </Popover>}
         <Button disabled={busy || restoring || (!turns.length && !draft && !contextLabel && !context.node)} onClick={newChat}>新对话</Button>
       </Space>
     </div>

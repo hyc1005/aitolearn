@@ -24,7 +24,7 @@ from .attachments import MATERIALS, archive_is_small, excerpt, material_signatur
 from .chat_agent import run_chat
 from .cleaning_agent import structured_review
 from .conversation import (CORRECTION_FIELDS, cleaning_card, deterministic, latest_clean, make_proposal, material_version, onboarding,
-                           proposal_card, resolve, resolve_recommendation, save_session, session_view,
+                           proposal_card, resolve, resolve_recommendation, save_session, session_summary, session_view,
                            settings_get, settings_put)
 from .data import REQUIRED, import_headers, profile, read_file, student_scores
 from .diagnosis import overview as diagnosis_overview, zero_evidence
@@ -229,9 +229,28 @@ def learning_chat(request: ChatRequest):
 @app.get("/api/chat/sessions")
 def chat_sessions():
     with db() as conn:
-        sessions = sorted(all_of(conn, "chat_session"), key=lambda item: item.get("updated", 0), reverse=True)
-        return [{"id": item["id"], "title": item["turns"][0]["question"][:72]}
-                for item in sessions if item.get("turns")][:30]
+        sessions = [session_summary(item) for item in all_of(conn, "chat_session") if item.get("turns")]
+        return sorted(sessions, key=lambda item: item["last_active_at"] or 0, reverse=True)[:30]
+
+
+class SessionTitle(BaseModel):
+    title: str | None
+
+
+@app.put("/api/chat/sessions/{key}/title")
+def update_chat_title(key: str, request: SessionTitle):
+    title = request.title.strip() if request.title is not None else None
+    if title is not None and not 1 <= len(title) <= 72:
+        raise HTTPException(422, "会话名称须为 1–72 个字")
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        session = require(conn, "chat_session", key)
+        if title is None:
+            session.pop("custom_title", None)
+        else:
+            session["custom_title"] = title
+        put(conn, "chat_session", key, session)
+        return session_summary(session)
 
 
 class SessionSelection(BaseModel):
@@ -258,7 +277,7 @@ def chat_session(key: str):
         session = session_view(conn, key)
         if session is None:
             raise HTTPException(404, "对话不存在")
-        return session
+        return {**session, **session_summary(session)}
 
 
 @app.get("/api/chat/proposals/{key}")
