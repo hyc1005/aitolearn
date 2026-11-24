@@ -1,3 +1,4 @@
+import { FollowUpEditor, StudentFollowUps } from './FollowUp'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Select, Skeleton, Space, Steps, Table, Tag, Tooltip, Typography, theme } from 'antd'
@@ -32,6 +33,11 @@ const pageKeys = new Set<string>(pages.map(([key]) => key))
 type ProfileTarget = { kind: 'student' | 'group'; id: string }
 const mobileSidebarQuery = '(max-width: 800px)'
 const sidebarPreference = 'aitolearn.sidebar.collapsed.v2'
+function summaryLine(value?: string) {
+  const line = value?.split(/[。！？\n]/)[0]?.trim() || ''
+  return line.length > 90 ? line.slice(0, 90) + '…' : line
+}
+
 function pageFromHash() {
   if (location.hash.startsWith('#agent')) return 'run'
   if (location.hash === '#models') return 'settings'
@@ -180,6 +186,8 @@ function Workbench() {
   const [node, setNode] = useState('')
   const [topic, setTopic] = useState('')
   const [jobs, setJobs] = useState<Row[]>([])
+  const [showArchived, setShowArchived] = useState(false)
+  const [followUpVersion, setFollowUpVersion] = useState(0)
   const [materials, setMaterials] = useState<Row[]>([])
   const [curriculum, setCurriculum] = useState<Row>({})
   const [drafts, setDrafts] = useState<Row[]>([])
@@ -192,6 +200,7 @@ function Workbench() {
   const [correction, setCorrection] = useState<Row>()
   const [corrected, setCorrected] = useState('{}')
   const [mapping, setMapping] = useState('{}')
+  const [suggestedMapping, setSuggestedMapping] = useState<{ source: string; files: File[]; values: Record<string, string> }>()
   const [selected, setSelected] = useState<Row>()
   const [answerId, setAnswerId] = useState('')
   const [profileSnapshot, setProfileSnapshot] = useState('')
@@ -202,6 +211,8 @@ function Workbench() {
   const [lookup, setLookup] = useState('')
   const [hits, setHits] = useState<Row[]>([])
   const [draft, setDraft] = useState<Row>()
+  const [bindingStudent, setBindingStudent] = useState('')
+  const [bindingLabel, setBindingLabel] = useState('')
   const [binding, setBinding] = useState({ label: '', webhook: '', secret: '' })
   const [preview, setPreview] = useState<Row>()
   const practicePreview = useRef<HTMLDivElement>(null)
@@ -239,7 +250,7 @@ function Workbench() {
   }, [page])
   useEffect(() => {
     if (page === 'chat' || page === 'settings' || page === 'run') {
-      void api<ModelAccess>('/models/settings').then(setModelAccess).catch(error => message.error(error.message))
+      void api<ModelAccess>('/models/connections').then(setModelAccess).catch(error => message.error(error.message))
     }
   }, [page])
   useEffect(() => {
@@ -338,7 +349,7 @@ function Workbench() {
   const compare: Axis[] = useMemo(() => topic
     ? (comparison.axes || noAxes).filter((a: Axis) => a.id.startsWith(topic)) : comparison.axes || noAxes,
   [comparison.axes, comparison.topics, topic])
-  const readEvidence = async (target: DiagnosticSelection & { student: string; axis: DiagnosticAxis }) => {
+  const readEvidence = async (target: DiagnosticSelection & { student: string; axis: DiagnosticAxis; include_unscored?: string }) => {
     const request = ++evidenceRequest.current
     const { axis, ...params } = target
     try {
@@ -353,7 +364,7 @@ function Workbench() {
   }
   const chooseEvidence = (axis: Axis) => {
     if (!data.snapshot_id || !profileReady) return
-    void readEvidence({ axis, indicator: axis.id, student, group: profileGroup, node, snapshot_id: data.snapshot_id })
+    void readEvidence({ axis, indicator: axis.id, student, group: profileGroup, node, snapshot_id: data.snapshot_id, include_unscored: 'true' })
   }
   const openReplay = () => perform(async () => setReplay(await api<CaseData>('/agent/cases/q015')))
   const selectedAnswer: Row | undefined = selected?.rows.find((row: Row) => row.作答事件编号 === answerId)
@@ -490,6 +501,11 @@ function Workbench() {
         openDraft={key => { const found = drafts.find(d => d.id === key); if (found) openDraft(found); else message.info('建议正在同步，请稍后再试') }}
         migrate={() => perform(async () => { openRun((await api('/imports/migrate', post)).run_id) })}
         retry={() => perform(async () => { setRunDetail(await api('/jobs/' + runId + '/retry', post)) })}
+        control={action => perform(async () => {
+          await api('/jobs/' + runId + '/control/' + action, post)
+          setRunDetail(await api('/agent/runs/' + runId))
+          await refresh()
+        })}
         rebase={() => perform(async () => { openRun((await api('/imports/' + runDetail?.payload.batch_id + '/rebase', post)).run_id) })}
         confirm={() => perform(async () => {
           await api('/imports/' + runDetail?.payload.batch_id + '/confirm' + query({ run_id: runId }), post)
@@ -534,6 +550,22 @@ function Workbench() {
           {files.length > 0 && importPreview && !importPreview.can_import && !importPreview.error &&
             !importPreview.files.some((file: Row) => file.status === 'error') &&
             <Alert type="warning" title="没有可导入的业务数据，请选择学情文件。" />}
+          {importPreview?.files?.some((file: Row) => file.status === 'error' && /^(缺少必需列|未识别到)/.test(file.message)) &&
+            <Button loading={busy} onClick={() => perform(async () => {
+              const payload = new FormData()
+              for (const file of files) payload.append('files', file)
+              payload.append('mapping', mapping)
+              const result = await api('/imports/suggest-mapping', { method: 'POST', body: payload })
+              if (!Object.keys(result.mapping).length) message.info('没有找到明确的列映射，请手动填写')
+              setSuggestedMapping({ source: mapping, files, values: result.mapping })
+            })}>建议列映射</Button>}
+          {suggestedMapping?.source === mapping && suggestedMapping.files === files && !!Object.keys(suggestedMapping.values).length &&
+            <Alert className="spaced" type="info" title="请核对建议列映射"
+              description={Object.entries(suggestedMapping.values).map(([from, to]) => from + ' → ' + to).join('、')}
+              action={<Button onClick={() => {
+                setMapping(JSON.stringify({ ...JSON.parse(mapping), ...suggestedMapping.values }))
+                setSuggestedMapping(undefined)
+              }}>应用并重新预检</Button>} />}
           <details className="spaced"><summary>自定义列映射</summary><Input.TextArea value={mapping} onChange={e => setMapping(e.target.value)} placeholder='{"学号":"学生编号"}' /></details>
           <Paragraph type="secondary" className="spaced">可上传 XLSX 工作簿或成组 CSV，也支持名册和总分。缺少文件时，清洗报告会列出无法关联的原始行。</Paragraph>
         </Card>
@@ -601,6 +633,13 @@ function Workbench() {
                   </div>)}
                 </section>}
             </div>}
+            {student && <Button className="spaced" onClick={() => perform(async () => {
+              const status = await api('/deliveries/binding/' + param(student))
+              setBinding({ label: '', webhook: '', secret: '' })
+              setBindingLabel(status.label)
+              setBindingStudent(student)
+            })}>投递群组</Button>}
+            {student && <StudentFollowUps key={student + ":" + followUpVersion} api={api} student={student} snapshot={activeSnapshot} />}
             {!!student && !!current.totals?.length && <Table rowKey="节点编号" dataSource={current.totals} pagination={false} columns={[{ title: '测验', dataIndex: '节点编号' }, { title: '总分', dataIndex: '测验总分' }]} />}
             {!!data.snapshot_id && <Space wrap className="spaced">
               <Button type="primary" loading={busy} onClick={() => launch({ student, group: profileGroup, node, snapshot_id: data.snapshot_id })}>
@@ -614,7 +653,8 @@ function Workbench() {
       {page === 'drafts' && <>
         <Card title="学习建议" extra={<Button disabled={!report?.snapshot_id} href="/api/export?formal=true">导出已确认成果</Button>}><Table rowKey="id" dataSource={drafts} columns={[
           { title: '对象', render: (_, d) => d.student || d.group }, { title: '测验', render: (_, d) => d.node || '全部' },
-          { title: '学情概述', dataIndex: 'observation' }, { title: '状态', render: (_, d) => !d.snapshot_id ? '历史记录 · 版本未登记' : d.approved ? '已确认' : ({ pass: '待确认', revise: '已退回', pending: '待终审' } as Row)[d.review_state] },
+          { title: '学情概述', render: (_, d) => <><div>{summaryLine(d.observation)}</div>
+            <Text type="secondary">{summaryLine(d.exercises?.[0]?.purpose || d.message || d.follow_up)}</Text></> }, { title: '状态', render: (_, d) => !d.snapshot_id ? '历史记录 · 版本未登记' : d.approved ? '已确认' : ({ pass: '待确认', revise: '已退回', pending: '待终审' } as Row)[d.review_state] },
           { title: '', render: (_, d) => <Button onClick={() => openDraft(d)}>打开</Button> },
         ]} /></Card>
         {!!deliveries.length && <Card title="投递记录"><Table rowKey="id" dataSource={deliveries} columns={['student','group','state','message'].map((k,i) => ({ dataIndex: k, title: ['学生','收件群','状态','备注'][i] }))} /></Card>}
@@ -623,10 +663,10 @@ function Workbench() {
         <Card id="model-access" title="模型接入">
           <ModelAccessPage access={modelAccess} api={api} update={setModelAccess} />
         </Card>
-        <Card title="后台任务" extra={<Text type="secondary">清洗与建议正在发起的位置同步显示进度</Text>}>
-          <Table<Row> rowKey="id" dataSource={jobs} columns={[{ title: '类型', render: (_,j) => ({ extract:'解析资料', publish:'建立索引', ...runNames } as Row)[j.kind] || j.kind },
+        <Card title="后台任务" extra={<Button onClick={() => setShowArchived(value => !value)}>{showArchived ? "查看未归档" : "查看已归档"}</Button>}>
+          <Table<Row> rowKey="id" dataSource={jobs.filter(item => !!item.archived === showArchived)} columns={[{ title: '类型', render: (_,j) => ({ extract:'解析资料', publish:'建立索引', ...runNames } as Row)[j.kind] || j.kind },
             { title: '对象', render: (_,j) => j.payload?.label || j.payload?.student || j.payload?.group || '' },
-            { title: '状态', render: (_,j) => <Tag color={j.state === 'failed' ? 'error' : j.state === 'done' ? 'success' : 'processing'}>{({ queued:'排队', running:'处理中', done:'完成', failed:'失败' } as Row)[j.state]}</Tag> },
+            { title: '状态', render: (_,j) => <Tag color={j.state === 'failed' ? 'error' : j.state === 'done' ? 'success' : 'processing'}>{({ queued:'排队', running:'处理中', done:'完成', failed:'失败', stopped:'已停止' } as Row)[j.state]}</Tag> },
             { title: '错误', dataIndex: 'error' },
             { title: '', render: (_,j) => <Space wrap>{['clean', 'generate', 'recommendation_review'].includes(j.kind) && <Button onClick={() => openRun(j.id)}>查看运行</Button>}
               {j.state === 'failed' && <Button onClick={() => perform(() => api('/jobs/' + j.id + '/retry', post))}>重试</Button>}</Space> }]} />
@@ -658,11 +698,11 @@ function Workbench() {
         <Text>{selected.axis.label} · {selected.rows.length} 条作答</Text></Space>
         <details><summary>数据快照</summary><code>{selected.snapshot_id}</code></details>
         {selected.rows.length > 1 && <Select className="spaced" aria-label="选择作答" value={answerId} onChange={setAnswerId}
-          options={selected.rows.map((row: Row) => ({ value: row.作答事件编号, label: row.节点编号 + ' · ' + row.材料编号 + ' · ' + row.得分 + '/' + row.满分 }))} />}
+          options={selected.rows.map((row: Row) => ({ value: row.作答事件编号, label: row.节点编号 + ' · ' + row.材料编号 + ' · ' + (row.评分状态 === '已评分' ? row.得分 + '/' + row.满分 : row.评分状态) }))} />}
         {selectedAnswer ? <div className="spaced">
           <AnswerEvidence key={answerId} answer={selectedAnswer as Parameters<typeof AnswerEvidence>[0]['answer']} />
           <Space wrap className="spaced">
-            <Button type="primary" loading={busy} onClick={() => {
+            <Button type="primary" loading={busy} disabled={!linkedDraft && selectedAnswer.评分状态 !== '已评分'} onClick={() => {
               if (linkedDraft) openDraft(linkedDraft)
               else void launch({ student: selectedAnswer.学生编号, node: selectedAnswer.节点编号, snapshot_id: selected.snapshot_id, anchor_event: answerId },
                 () => setSelected(undefined))
@@ -686,6 +726,22 @@ function Workbench() {
     <Drawer open={!!citation} title={citation?.title + ' · ' + citation?.locator} size={730} onClose={() => setCitation(undefined)}>
       {citation && <><Paragraph className="preserve">{citation.text}</Paragraph><SourcePage key={citation.id} citation={citation} /></>}
     </Drawer>
+    <Drawer open={!!bindingStudent} title={'投递群组 · ' + bindingStudent} size="min(500px, 100vw)"
+      onClose={() => { setBindingStudent(''); setBinding({ label: '', webhook: '', secret: '' }) }}>
+      <Space orientation="vertical" className="wide">
+        <Text>{bindingLabel ? '已绑定 · ' + bindingLabel : '未绑定'}</Text>
+        <Input placeholder="群标签" value={binding.label} onChange={e => setBinding({ ...binding, label: e.target.value })} />
+        <Input.Password placeholder="Webhook 地址" value={binding.webhook} onChange={e => setBinding({ ...binding, webhook: e.target.value })} />
+        <Input.Password placeholder="签名密钥（可选）" value={binding.secret} onChange={e => setBinding({ ...binding, secret: e.target.value })} />
+        <Button loading={busy} disabled={!binding.label || !binding.webhook} onClick={() => perform(async () => {
+          const saved = await api('/deliveries/binding/' + param(bindingStudent), json('PUT', binding))
+          setBindingLabel(saved.label)
+          setBinding({ label: '', webhook: '', secret: '' })
+          setPreview(undefined)
+          message.success('已保存绑定')
+        })}>保存绑定</Button>
+      </Space>
+    </Drawer>
     <Drawer open={!!draft} title={'教学安排 · ' + (draft?.student || draft?.group || '')} size="min(860px, 100vw)" onClose={() => setDraft(undefined)}
       footer={draft && <Space wrap className="draft-controls">
         {changed ? <Button type="primary" loading={busy} onClick={() => saveDraft(false)}>保存修订并重新终审</Button>
@@ -699,7 +755,7 @@ function Workbench() {
       {draft && <><Title level={5}>学情与依据</Title>
         <Paragraph editable={draft.snapshot_id ? { onChange: observation => { setDraft({ ...draft, observation, approved: false }); setPreview(undefined) } } : false}>{draft.observation}</Paragraph>
         <Paragraph editable={draft.snapshot_id ? { onChange: uncertainty => { setDraft({ ...draft, uncertainty, approved: false }); setPreview(undefined) } } : false}>{draft.uncertainty}</Paragraph>
-        {draft.evidence.map((r: Row) => <Paragraph key={r.id}>{r.材料编号} · {r.得分}/{r.满分} · {r.阶段 || r.节点编号} · {r.评分点得分}<br />{r.解答过程}</Paragraph>)}
+        {draft.evidence.map((r: Row) => <Paragraph key={r.id}>{r.材料编号} · {r.得分}/{r.满分} · {r.阶段 || r.节点编号} · {r.评分点得分}<br /><span className="preserve">{r.解答过程}</span></Paragraph>)}
         {draft.teaching_points?.length ? <><Title level={5}>教学说明与原文</Title>
           {draft.teaching_points.map((point: Row, index: number) => <Card size="small" className="spaced" key={index}>
             <Paragraph editable={{ onChange: value => {
@@ -728,6 +784,9 @@ function Workbench() {
               setDraft({ ...draft, exercises, approved: false }); setPreview(undefined)
             } } : false}>{h}</Paragraph>
           </li>)}</ol></Card>)}
+        {draft.student && draft.snapshot_id && <FollowUpEditor key={draft.id + ":" + draft.revision} api={api}
+          id={draft.id} revision={draft.revision} approved={draft.approved && !changed} snapshot={activeSnapshot}
+          onAssigned={() => setFollowUpVersion(version => version + 1)} />}
         {draft.checked_variant && <Alert className="spaced" type="success" message={draft.checked_variant.question} description={'教师参考答案：' + draft.checked_variant.answer} />}
         <Title level={5}>给学生的话</Title><Input.TextArea value={draft.message} onChange={e => { setDraft({ ...draft, message: e.target.value, approved: false }); setPreview(undefined) }} rows={4} />
         <div className="spaced"><Tag>修订 {draft.revision}</Tag><Tag>{changed ? '有未保存修改' : draft.approved ? '已确认' : currentReview?.decision === 'pass' ? '通过终审' : currentReview?.decision === 'revise' ? '退回修订' : draft.snapshot_id ? '待终审' : '历史记录'}</Tag></div>

@@ -237,8 +237,8 @@ small { font-size: var(--type-small); }
 .chat-turn blockquote .ant-btn { padding-inline: 0; white-space: normal; text-align: start; min-height: 36px; height: auto; }
 .chat-composer-dock { position: sticky; bottom: 0; z-index: 2; padding: 10px 0 max(10px, env(safe-area-inset-bottom)); background: var(--paper); }
 .chat-is-empty .chat-composer-dock { position: static; }
-.chat-composer { padding: 8px 12px; border: 1px solid var(--line); border-radius: 20px; background: var(--surface); }
-.chat-composer:focus-within { border-color: var(--accent); }
+.chat-composer { padding: 8px 12px; }
+.chat-composer textarea:focus-visible, .chat-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .chat-composer-actions { display: flex; justify-content: space-between; gap: 8px; align-items: flex-end; }
 .chat-context { min-width: 0; overflow-wrap: anywhere; }
 .chat-composer-actions > .ant-btn, .chat-context .ant-btn { min-width: 44px; min-height: 44px; }
@@ -319,3 +319,28 @@ small { font-size: var(--type-small); }
   .chat-indicator { align-items: flex-start; flex-direction: column; }
   .onboarding-card .ant-card-extra { margin-inline-start: 0; }
 }
+.follow-up-pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  gap: 1rem;
+}
+.follow-up-pair > * { min-width: 0; }
+.follow-up-pair .answer-grid { grid-template-columns: minmax(0, 1fr); }
+.chat-composer-actions { flex-wrap: wrap; }
+.chat-context { flex: 1 1 100px; min-width: 0; }
+.chat-submit { display: flex; align-items: center; gap: 8px; margin-inline-start: auto; }
+.chat-submit { min-width: 0; max-width: 100%; }
+.chat-menu { position: relative; min-width: 0; }
+.chat-menu > button { max-width: min(38vw, 245px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-menu button { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 8px; min-height: 36px; }
+.chat-menu button:hover, .chat-menu button:focus-visible { background: var(--surface); }
+.chat-menu button:disabled { cursor: default; opacity: .65; }
+.chat-menu-options { position: absolute; z-index: 4; bottom: 100%; right: 0; background: var(--paper); box-shadow: 0 3px 16px #0003; padding: 4px; width: max-content; max-width: min(70vw, 340px); max-height: 40vh; overflow: auto; }
+.chat-menu-options button { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; }
+.connection-models, .connection-model { display: grid; gap: 8px; }
+.connection-model { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.chat-submit .chat-send { inline-size: 44px; block-size: 44px; flex: 0 0 44px; padding: 0; }
+.chat-history { display: grid; max-width: min(80vw, 340px); max-height: 50vh; overflow-y: auto; }
+.chat-history .ant-btn { justify-content: flex-start; white-space: normal; text-align: start; height: auto; }
+.issue-frequency { display: grid; grid-template-columns: minmax(100px, 2fr) minmax(50px, 1fr) auto; align-items: center; gap: 10px; }
+.issue-frequency meter { width: 100%; }

@@ -11,6 +11,7 @@ from backend.agent import Draft, Variant, validate_links, validate_variant
 from backend.cleaning_agent import CleaningReview, review_import
 from backend.data import read_file
 from backend.main import app
+from backend.model_transport import ModelRequestError
 from backend.recommendation_review import FinalReview, final_review
 from backend.snapshots import run_data_cleaning, table_data
 
@@ -99,6 +100,82 @@ class WorkflowTests(TestCase):
 
     def confirm(self, batch):
         return self.client.post(f"/api/imports/{batch['batch_id']}/confirm", params={"run_id": batch["run_id"]})
+
+    def test_follow_up_reads_only_confirmed_later_assessments(self):
+        def upload(rows, name):
+            payload = "".join(rows).encode()
+            response = self.client.post("/api/imports", files={"files": (name, payload, "text/csv")})
+            self.assertEqual(response.status_code, 200, response.text)
+            batch = response.json()
+            self.run_cleaning(batch["run_id"])
+            return batch
+
+        base_header = "记录编号,学生编号,材料编号,节点编号,作答事件编号,修订版本,评分状态,得分,满分,主题编号\n"
+        sources = {
+            "模拟学生.csv": "学生编号,模拟班级编号\nD01,A\nD02,A\n",
+            "课程要求.csv": "指标编号,主题编号,观察指标\nI1,T1,去括号\n",
+            "测验节点.csv": "节点编号,可用题目编号,模拟测验日期\nN01,Q1,2026-01-20\n",
+            "题目与材料.csv": ("材料编号,材料类型,主题编号,题型,指标编号,满分\n"
+                              "Q1,测验题,T1,解答题,I1,4\nQ2,测验题,T1,解答题,I1,8\n"
+                              "Q3,测验题,T2,解答题,I1,8\n"),
+            "作答记录.csv": base_header + "A1,D01,Q1,N01,E1,1,已评分,0,4,T1\n",
+        }
+        response = self.client.post("/api/imports", files=[
+            ("files", (name, source.encode(), "text/csv")) for name, source in sources.items()
+        ])
+        self.assertEqual(response.status_code, 200, response.text)
+        first = response.json()
+        run = self.run_cleaning(first["run_id"])
+        self.assertEqual(self.confirm(first).status_code, 200)
+        draft = {"id": "example", "student": "D01", "exercises": [{"question_id": "Q1"}], "revision": 1,
+                 "snapshot_id": run["result"]["snapshot_id"], "approved": False, "node": "N01"}
+        path = "/api/recommendations/example/follow-up"
+        directions = ["indicator:I1", "form:解答题"]
+        assignment = {"revision": 1, "baseline_node": "N01", "directions": directions}
+        with store.db() as conn:
+            store.put(conn, "draft", "example", draft)
+            store.put(conn, "draft_revision", "example:1", draft)
+        self.assertEqual(self.client.get(path, params={"revision": 1}).json()["default_node"], "N01")
+        self.assertEqual(self.client.put(path, json=assignment).status_code, 409)
+        with store.db() as conn:
+            store.put(conn, "draft", "example", {**draft, "approved": True})
+        self.assertEqual(self.client.put(path, json={**assignment, "directions": ["unknown"]}).status_code, 422)
+        recorded = self.client.put(path, json=assignment)
+        self.assertEqual(recorded.status_code, 200, recorded.text)
+        self.assertEqual(self.client.put(path, json=assignment).json()["assigned_at"], recorded.json()["assigned_at"])
+        new_nodes = upload(["节点编号,可用题目编号,模拟测验日期\n",
+                            'N02,"Q2、Q3",2026-06-17\n'], "测验节点.csv")
+        self.assertEqual(self.confirm(new_nodes).status_code, 200)
+        second = upload([base_header, "A1R,D01,Q1,N01,E1,2,已评分,4,4,T1\n",
+                         "A2,D01,Q2,N02,E2,1,已评分,6,8,T1\n",
+                         "A3,D01,Q3,N02,E3,1,已评分,8,8,T2\n",
+                         "A4,D02,Q2,N02,E4,1,已评分,8,8,T1\n"], "作答记录.csv")
+        pending = self.client.get(path, params={"revision": 1}).json()["assignment"]["results"]
+        self.assertEqual(pending[0]["observations"][0]["status"], "missing")
+        self.assertEqual(self.confirm(second).status_code, 200)
+        items = self.client.get("/api/students/D01/follow-ups").json()
+        indicator, form = items[0]["results"]
+        self.assertEqual(indicator["baseline"]["rate"], 0)
+        self.assertEqual([value["node"] for value in form["observations"]], ["N02"])
+        self.assertEqual((indicator["observations"][0]["count"], indicator["observations"][0]["rate"]), (2, 87.5))
+        self.assertEqual((form["observations"][0]["count"], form["observations"][0]["rate"]), (1, 75))
+        self.assertEqual(form["observations"][0]["attempts"][0]["作答事件编号"], "E2")
+
+    def test_stop_preserves_completed_cleaning_checkpoint(self):
+        batch = self.post_import()
+        key = batch["run_id"]
+        self.assertEqual(self.client.post(f"/api/jobs/{key}/control/stop").json()["state"], "stopped")
+        self.assertEqual(self.client.post(f"/api/jobs/{key}/retry").json()["state"], "queued")
+        with store.db() as conn:
+            job = store.get(conn, "job", key)
+            job["state"] = "running"
+            store.put(conn, "job", key, job)
+        self.assertTrue(self.client.post(f"/api/jobs/{key}/control/stop").json()["stop_requested"])
+        workflow.checkpoint(job, "python", {"snapshot_id": "example"})
+        with self.assertRaises(workflow.JobStopped):
+            workflow.checkpoint(job, "clean_review")
+        with store.db() as conn:
+            self.assertIn("python", store.get(conn, "job", key)["stages"])
 
     def test_determinism_and_duplicates(self):
         cleaned = run_data_cleaning(self.rows)
@@ -341,13 +418,16 @@ class WorkflowTests(TestCase):
         self.assertEqual(current["tables"]["作答记录"][values["作答事件编号"]]["评分状态"], "待评分")
         self.assertEqual(current["manifest"][-1]["revision_of"]["line"], issue["line"])
 
-    def test_cleaning_review_rejects_wrong_counts(self):
-        def wrong_counts(schema, prompt, facts, session):
-            return CleaningReview(counts={**facts["counts"], "valid_scored": 790},
-                                  summary="计数复核", findings=[], decision="ready"), "test"
-        with patch("backend.cleaning_agent.structured_review", side_effect=wrong_counts):
-            with self.assertRaisesRegex(ValueError, "不一致"):
-                review_import(run_data_cleaning(self.rows), None, "test")
+    def test_cleaning_review_keeps_python_counts_and_repairs_invalid_reference(self):
+        answers = [
+            CleaningReview(summary="检查", findings=[{"detail": "核对", "refs": ["wrong"]}], decision="ready"),
+            CleaningReview(summary="检查", findings=[{"detail": "核对", "refs": ["counts"]}], decision="ready"),
+        ]
+        snapshot = run_data_cleaning(self.rows)
+        with patch("backend.cleaning_agent.structured_review", side_effect=[(value, "test") for value in answers]) as review:
+            result = review_import(snapshot, None, "test")
+        self.assertEqual(review.call_count, 2)
+        self.assertEqual(result["counts"]["valid_scored"], snapshot["report"]["valid_scored"])
 
     def test_draft_revision_requires_matching_final_review(self):
         draft = {"id": "draft", "student": "D01", "group": "", "revision": 1, "snapshot_id": "snapshot",
@@ -375,8 +455,9 @@ class WorkflowTests(TestCase):
         result = FinalReview(decision="revise", checks={"sample": "pass", "source": "revise", "exercise": "pass",
                              "student_text": "pass"}, summary="退回", findings=[{"detail": "缺少引用", "refs": ["made-up"]}])
         with patch("backend.recommendation_review.structured_review", return_value=(result, "test")):
-            with self.assertRaisesRegex(ValueError, "无效引用"):
+            with self.assertRaises(ModelRequestError) as failed:
                 final_review(draft, "test")
+        self.assertEqual(failed.exception.code, "reference")
 
     def test_chat_agent_executes_tools_and_preserves_the_evidence_scope(self):
         batch = self.post_import()

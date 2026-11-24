@@ -3,9 +3,9 @@ import time
 
 from .materials import process
 from .model_transport import model_failure, model_job
-from .search import encode
+from .search import optional_encode
 from .store import all_of, db, get, put
-from .workflow import review_recommendation, run_cleaning, run_recommendation
+from .workflow import JobStopped, review_recommendation, run_cleaning, run_recommendation
 
 
 def run():
@@ -42,15 +42,18 @@ def run():
             elif job["kind"] == "publish":
                 with db() as conn:
                     doc = get(conn, "material", job["payload"]["material"])
-                vectors = encode([c["text"] for c in doc["blocks"]])
-                for chunk, vector in zip(doc["blocks"], vectors):
-                    chunk["vector"] = vector
-                doc["state"] = "published"
-                with db() as conn:
-                    put(conn, "material", doc["id"], doc)
-                    if doc.get("replaces"):
-                        prior = get(conn, "material", doc["replaces"])
-                        put(conn, "material", prior["id"], {**prior, "state": "replaced"})
+                if doc["state"] != "published":
+                    vectors = optional_encode([c["text"] for c in doc["blocks"]])
+                    for chunk, vector in zip(doc["blocks"], vectors):
+                        chunk["vector"] = vector
+                    with db() as conn:
+                        conn.execute("BEGIN IMMEDIATE")
+                        if doc.get("replaces"):
+                            prior = get(conn, "material", doc["replaces"])
+                            if prior["state"] != "published":
+                                raise ValueError("被替换的资料已更新，请从当前发布版本重新校订")
+                            put(conn, "material", prior["id"], {**prior, "state": "replaced"})
+                        put(conn, "material", doc["id"], {**doc, "state": "published"})
                 job["result"] = {"material": doc["id"]}
             elif job["kind"] == "clean":
                 run_cleaning(job)
@@ -61,6 +64,8 @@ def run():
             else:
                 raise ValueError("未知任务类型")
             job["state"] = "done"
+        except JobStopped:
+            job["state"] = "stopped"
         except Exception as exc:
             job["state"] = "failed"
             if failure := model_failure(exc):
@@ -72,7 +77,9 @@ def run():
                 code = getattr(exc, "status_code", None)
                 job["error"] = {401: "模型密钥无效", 429: "模型调用达到限额"}.get(code, type(exc).__name__)
             job.setdefault("failures", []).append({"stage": job.get("stage"),
-                                                   "error": job["error"], "at": time.time()})
+                                                   "error": job["error"], "at": time.time(),
+                                                   "code": job.get("model_error"),
+                                                   "request": job.get("last_model_request")})
         finally:
             model_job.reset(token)
             job["model_retrying"] = False

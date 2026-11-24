@@ -24,6 +24,11 @@ MESSAGES = {
     "configuration": "模型平台拒绝了请求，请检查模型设置",
     "quota": "模型平台余额或额度不足",
     "context": "本次模型输入超过可用上下文，请缩小查询范围",
+    "empty": "模型返回空内容",
+    "truncated": "模型输出已截断",
+    "json": "模型输出无法解析为 JSON",
+    "schema": "模型输出字段不符合要求",
+    "reference": "模型使用了无效证据或检查项",
     "response": "模型平台没有返回可用内容",
 }
 
@@ -97,14 +102,27 @@ class ModelTransport(httpx.BaseTransport):
                         response.close()
                         response = None
                     code = "timeout" if isinstance(error, httpx.TimeoutException) else "connection"
-            logger.info("model_request %s", json.dumps({
+            finish_reason = ""
+            if response is not None and not code:
+                try:
+                    choices = response.json().get("choices", [])
+                    reason = choices[0].get("finish_reason") if choices else None
+                    if reason in {"stop", "length", "tool_calls", "function_call", "content_filter"}:
+                        finish_reason = reason
+                except (ValueError, AttributeError, TypeError, KeyError):
+                    pass
+            metadata = {
                 "run_id": job["id"] if job else self.session,
                 "stage": job.get("stage") if job else self.stage,
                 "provider": self.provider, "model": self.model, "bytes": size,
                 "elapsed_ms": round((time.monotonic() - started) * 1000), "retry": retry,
                 "status": response.status_code if response is not None else None, "result": code or "ok",
                 "request_id": response.headers.get("x-request-id", "")[:96] if response is not None else "",
-            }, ensure_ascii=False))
+                "finish_reason": finish_reason,
+            }
+            if job is not None:
+                job["last_model_request"] = metadata
+            logger.info("model_request %s", json.dumps(metadata, ensure_ascii=False))
             delay = retry_delay(response)
             if not retry and code in {"connection", "timeout", "rate_limit", "upstream"} and delay <= 5:
                 if response is not None:

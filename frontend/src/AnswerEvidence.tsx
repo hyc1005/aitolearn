@@ -10,8 +10,12 @@ export type Answer = {
   解答过程?: string
   学生最终作答?: string
   评分点得分?: string
+  评分状态?: string
+  修订版本?: string
+  作答事件编号?: string
   题目: { 题干或内容?: string; 评分点?: string }
   来源: { source: string; sheet?: string; line: number }
+  原始来源?: { source: string; sheet?: string; line: number }
 }
 
 export function AnswerEvidence({ answer, onInspect }: { answer: Answer; onInspect?: () => void }) {
@@ -35,7 +39,8 @@ export function AnswerEvidence({ answer, onInspect }: { answer: Answer; onInspec
     <header className="answer-heading">
       <div><div className="small-label">{[answer.学生编号, answer.节点编号, answer.材料编号].filter(Boolean).join(' · ')}</div>
         <h3>{answer.题目.题干或内容 || '题干待补充'}</h3></div>
-      <strong className="answer-score" aria-label={'得分 ' + answer.得分 + '/' + answer.满分}>{answer.得分}<small> / {answer.满分}</small></strong>
+      {answer.评分状态 && answer.评分状态 !== '已评分' ? <strong>{answer.评分状态}</strong>
+        : <strong className="answer-score" aria-label={'得分 ' + answer.得分 + '/' + answer.满分}>{answer.得分}<small> / {answer.满分}</small></strong>}
     </header>
     <div className="answer-grid">
       <section className="answer-paper">
@@ -51,7 +56,9 @@ export function AnswerEvidence({ answer, onInspect }: { answer: Answer; onInspec
           onToggle={event => { if (event.currentTarget.open) onInspect?.() }}>
           <summary>查看完整作答与原始行</summary>
           <p className="preserve">{process}</p><p>最终填写 · {result || '—'}</p>
+          {answer.作答事件编号 && <p>事件 {answer.作答事件编号} · 修订 {answer.修订版本 || '—'}</p>}
           <small>{answer.来源.source} · {answer.来源.sheet} · 第 {answer.来源.line} 行</small>
+          {answer.原始来源 && <p>导入原始行：{answer.原始来源.source} · {answer.原始来源.sheet} · 第 {answer.原始来源.line} 行</p>}
         </details>
       </section>
       <section className="score-points" aria-label="评分点">

@@ -16,24 +16,32 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from keyring.errors import KeyringError
 from pydantic import BaseModel, Field, SecretStr
+from starlette.concurrency import run_in_threadpool
 
 from .agent import api_key
 from .chat_agent import run_chat
+from .cleaning_agent import structured_review
 from .conversation import (CORRECTION_FIELDS, cleaning_card, deterministic, latest_clean, make_proposal, material_version, onboarding,
                            proposal_card, resolve, resolve_recommendation, save_session, session_view,
                            settings_get, settings_put)
-from .data import REQUIRED, profile, read_file, student_scores
+from .data import REQUIRED, import_headers, profile, read_file, student_scores
 from .diagnosis import overview as diagnosis_overview, zero_evidence
+from .follow_up import router as follow_up_router
 from .learning_chat import ChatRequest, ChatTurn, collect_sources, reply
+from .learning_progress import answer_progress
+from .model_connections import migrate as migrate_connections, router as model_router, selection as chat_selection
 from .models import KEY_SERVICE, PROVIDERS, ToolsUnavailable, active_provider, complete, provider_config, provider_key
 from .recommendation_review import preview_text
-from .search import search
+from .search import backfill_index, search
 from .snapshots import current_snapshot, legacy_batches, queue_cleaning, queue_job, table_data
 from .store import all_of, db, get, new_id, put, save_file
+from . import student_query
 
 
 @asynccontextmanager
 async def lifespan(app):
+    await run_in_threadpool(student_query.backfill, db)
+    await run_in_threadpool(backfill_index, db)
     with db() as conn:
         for item in all_of(conn, "delivery"):
             if item["state"] == "sending":
@@ -42,6 +50,8 @@ async def lifespan(app):
 
 
 app = FastAPI(title="智慧学伴", lifespan=lifespan)
+app.include_router(follow_up_router)
+app.include_router(model_router)
 
 
 @app.middleware("http")
@@ -146,12 +156,22 @@ def learning_chat(request: ChatRequest):
         active = current_snapshot(conn)
         snapshot = require(conn, "snapshot", request.snapshot_id) if request.snapshot_id else active
         request.snapshot_id = snapshot["id"] if snapshot else ""
-        provider = active_provider(conn)
-    result = None
-    mode = "buttons"
-    if request.use_tools and provider_key(provider):
+        if snapshot and not student_query.is_indexed(conn, request.snapshot_id):
+            raise HTTPException(404, "该快照尚未确认")
+        if not get(conn, "model_connection", "opencode"):
+            migrate_connections(conn)
+        selected = chat_selection(conn, request, session)
+        provider = request.provider or (session or {}).get("provider") or active_provider(conn)
+        if not selected and request.provider and (provider not in PROVIDERS or not provider_key(provider)):
+            raise HTTPException(422, "请选择已配置的模型")
+        request.provider = provider if request.provider or (session or {}).get("provider") else None
+        result = answer_progress(conn, snapshot, request)
+    called = False
+    mode = "data" if result else "buttons"
+    if result is None and request.use_tools and (selected or (not request.use_configured_models and provider in PROVIDERS and provider_key(provider))):
         try:
-            result = run_chat(request, snapshot, provider)
+            called = True
+            result = run_chat(request, snapshot, selected or provider)
             mode = "tools"
         except ToolsUnavailable:
             mode = "without_tools"
@@ -161,13 +181,16 @@ def learning_chat(request: ChatRequest):
         with db() as conn:
             result = deterministic(conn, request, snapshot)
         if result is None:
+            if request.use_configured_models and not selected:
+                raise HTTPException(422, "请先在设置中勾选并测试一个聊天模型")
             try:
                 with db() as conn:
                     sources = collect_sources(conn, snapshot, request)
             except ValueError as error:
                 raise HTTPException(422, str(error)) from None
             try:
-                result = reply(request, sources, new_id())
+                called = True
+                result = reply(request, sources, new_id(), selected)
             except ValueError as error:
                 raise HTTPException(502, str(error)) from None
             proposal = result.pop("proposal", None) if isinstance(result, dict) else None
@@ -188,10 +211,40 @@ def learning_chat(request: ChatRequest):
     result.setdefault("cards", [])
     result["snapshot_id"] = request.snapshot_id
     result["mode"] = mode
+    if selected:
+        result["selection"] = selected.metadata()
+        if called:
+            result["model_call"] = selected.metadata()
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         saved = save_session(conn, request.session_id, request, result)
         return {**result, "session_id": saved["id"], "context": saved["context"]}
+
+
+@app.get("/api/chat/sessions")
+def chat_sessions():
+    with db() as conn:
+        sessions = sorted(all_of(conn, "chat_session"), key=lambda item: item.get("updated", 0), reverse=True)
+        return [{"id": item["id"], "title": item["turns"][0]["question"][:72]}
+                for item in sessions if item.get("turns")][:30]
+
+
+class SessionSelection(BaseModel):
+    connection_id: str = Field(min_length=1, max_length=40)
+    model_id: str = Field(min_length=1, max_length=180)
+    effort: str = Field(max_length=16)
+    provider: str | None = None
+
+
+@app.put("/api/chat/sessions/{key}/selection")
+def update_chat_selection(key: str, selection: SessionSelection):
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        session = require(conn, "chat_session", key)
+        selected = chat_selection(conn, selection, session)
+        session["selection"] = selected.metadata()
+        put(conn, "chat_session", key, session)
+        return session["selection"]
 
 
 @app.get("/api/chat/sessions/{key}")
@@ -390,10 +443,14 @@ def run_detail(key: str):
                        correction=require(conn, "import", run["payload"]["batch_id"]).get("correction", False))
         if "interpret" in stages:
             data = table_data(require(conn, "snapshot", run["payload"]["snapshot_id"]))
+            scope = profile(data, *(run["payload"].get(field, "") for field in ("student", "group", "node")))
+            run["interpret_indicators"] = {axis["id"]: {key: axis[key] for key in ("label", "coverage", "population", "n")}
+                                           for axis in scope["axes"]}
             refs = {ref for claim in stages["interpret"]["claims"] for ref in claim["refs"][1:]}
             run["linked_evidence"] = {ref: {**data["作答记录"][ref],
                                           "题目": data["题目与材料"][data["作答记录"][ref]["材料编号"]]}
                                       for ref in refs}
+        run["stop_requested"] = run["state"] == "running" and bool(get(conn, "job_stop", key))
         return run
 
 
@@ -486,6 +543,26 @@ def q015_case():
     ]}
 
 
+@app.post("/api/jobs/{key}/control/{action}")
+def manage_job(key: str, action: str):
+    with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        item = require(conn, "job", key)
+        if action == "stop" and item["kind"] not in {"clean", "generate", "recommendation_review"} and item["state"] == "running":
+            raise HTTPException(409, "当前任务不支持阶段停止")
+        if action == "stop" and item["state"] == "running":
+            put(conn, "job_stop", key, {"requested": True})
+            return {"state": "running", "stop_requested": True}
+        if action == "stop" and item["state"] == "queued":
+            item["state"] = "stopped"
+        elif action in {"archive", "unarchive"} and item["state"] in {"done", "failed", "stopped"}:
+            item["archived"] = action == "archive"
+        else:
+            raise HTTPException(409, "当前任务状态不支持此操作")
+        put(conn, "job", key, item)
+        return item
+
+
 @app.post("/api/jobs/{key}/retry")
 def retry(key: str):
     with db() as conn:
@@ -494,11 +571,14 @@ def retry(key: str):
 
 
 def retry_run(conn, item):
-    if item["state"] != "failed":
-        raise HTTPException(409, "仅失败任务可以重试")
+    if item["state"] not in {"failed", "stopped"}:
+        raise HTTPException(409, "仅失败或已停止的任务可以恢复")
     if item["kind"] not in {"clean", "generate", "recommendation_review"}:
         return job(conn, item["kind"], item["payload"])
     item["state"] = "queued"
+    item.pop("archived", None)
+    item.pop("last_model_request", None)
+    conn.execute("DELETE FROM records WHERE kind = 'job_stop' AND id = ?", (item["id"],))
     item.pop("error", None)
     item.pop("model_error", None)
     put(conn, "job", item["id"], item)
@@ -550,6 +630,37 @@ async def preview_import(files: list[UploadFile] = File(...), mapping: str = For
     return {"files": [info for info, _, _ in inspected],
             "can_import": any(rows for _, _, rows in inspected) and not any(
                 info["status"] == "error" for info, _, _ in inspected)}
+
+
+class ColumnMapping(BaseModel):
+    mapping: dict[str, str]
+
+
+@app.post("/api/imports/suggest-mapping")
+async def suggest_import_mapping(files: list[UploadFile] = File(...), mapping: str = Form("{}")):
+    inspected = await inspect_import(files, mapping)
+    existing = json.loads(mapping)
+    expected = {field for fields in REQUIRED.values() for field in fields} | {"测验总分"}
+    unknown = set()
+    for info, raw, _ in inspected:
+        if info["status"] != "error" or not info["message"].startswith(("缺少必需列", "未识别到")):
+            continue
+        for headers in import_headers(info["name"], raw):
+            unknown.update(str(value).strip() for value in headers if value is not None
+                           and 0 < len(str(value).strip()) <= 100)
+    candidates = sorted(unknown - expected - existing.keys())[:100]
+    if not candidates:
+        return {"mapping": {}}
+    try:
+        result, _ = await run_in_threadpool(
+            structured_review, ColumnMapping,
+            "建议数据表表头映射。仅映射 supplied 中含义明确且与 required 一致的表头。无法确定时省略。",
+            {"supplied": candidates, "required": sorted(expected), "tables": REQUIRED}, new_id(),
+        )
+    except ValueError as error:
+        raise HTTPException(502, str(error)) from None
+    suggested = {key: value for key, value in result.mapping.items() if key in candidates and value in expected}
+    return {"mapping": suggested}
 
 
 @app.post("/api/imports")
@@ -646,6 +757,8 @@ def confirm_batch(conn, key, run_id):
             active is None and run["payload"]["legacy_baseline"] != legacy_batches(conn)):
         raise HTTPException(409, "基础数据已变更，请按当前数据重新运行清洗")
     new_snapshot = require(conn, "snapshot", run["result"]["snapshot_id"])
+    student_query.init(conn)
+    student_query.index_snapshot(conn, new_snapshot)
     put(conn, "settings", "active_snapshot", {"id": new_snapshot["id"], "review_run_id": run_id})
     put(conn, "import", key, {**item, "confirmed": True, "snapshot_id": new_snapshot["id"]})
     put(conn, "job", run_id, {**run, "stage": "published", "confirmed_at": time.time()})
@@ -753,34 +866,46 @@ def curriculum():
                               for row in data["题目与材料"].values()]}
 
 
+def confirmed_snapshot_id(conn, requested):
+    sid = requested or (get(conn, "settings", "active_snapshot") or {}).get("id", "")
+    if sid and not student_query.is_indexed(conn, sid):
+        raise HTTPException(404, "该快照不存在或尚未确认")
+    return sid
+
+
 @app.get("/api/profiles")
 def profiles(student: str = "", group: str = "", node: str = "", snapshot_id: str = ""):
     with db() as conn:
-        active = require(conn, "snapshot", snapshot_id) if snapshot_id else current_snapshot(conn)
-        data = table_data(active)
-    students = list(data["模拟学生"].values())
-    groups = sorted({r["模拟班级编号"] for r in students})
-    return {"profile": profile(data, student, group, node, include_question_scope=True), "students": students,
-            "groups": [profile(data, group=g, node=node, include_question_scope=True) for g in groups],
-            "nodes": list(data["测验节点"].keys()), "snapshot_id": active["id"] if active else None,
+        sid = confirmed_snapshot_id(conn, snapshot_id)
+        data = student_query.metadata(conn, sid)
+        students = list(data["模拟学生"].values())
+        groups = sorted({r["模拟班级编号"] for r in students})
+        scoped = student_query.profile(conn, sid, data, student, group, node, include_question_scope=True)
+        grouped = [student_query.profile(conn, sid, data, group=g, node=node, include_question_scope=True) for g in groups]
+    return {"profile": scoped, "students": students, "groups": grouped,
+            "nodes": list(data["测验节点"].keys()), "snapshot_id": sid or None,
             "node_details": list(data["测验节点"].values()), "curriculum": list(data["课程要求"].values())}
 
 
 @app.get("/api/profiles/evidence")
-def evidence(indicator: str, student: str = "", group: str = "", node: str = "", snapshot_id: str = "", item: str = ""):
+def evidence(indicator: str, student: str = "", group: str = "", node: str = "", snapshot_id: str = "", item: str = "",
+             include_unscored: bool = False):
     with db() as conn:
-        active = require(conn, "snapshot", snapshot_id) if snapshot_id else current_snapshot(conn)
-        data = table_data(active)
-    snapshot = profile(data, student, group, node)
-    selected = next((a for a in snapshot["axes"] + snapshot["topics"] if a["id"] == indicator), None)
-    if selected is None:
-        raise HTTPException(404, "指标不存在")
-    rows = [{**row, "题目": data["题目与材料"][row["材料编号"]]} for key in selected["attempt_ids"]
-            if (row := data["作答记录"].get(key)) and (not item or row["材料编号"] == item)]
-    if student and rows and active:
+        sid = confirmed_snapshot_id(conn, snapshot_id)
+        data = student_query.metadata(conn, sid)
+        curriculum = data["课程要求"]
+        if indicator in curriculum:
+            filters = {"skill": indicator}
+        elif any(r["主题编号"] == indicator for r in curriculum.values()):
+            filters = {"topics": [indicator]}
+        else:
+            raise HTTPException(404, "指标不存在")
+        rows = student_query.answer_rows(conn, sid, student, group, node, item,
+                                         scored_only=not include_unscored, **filters)
+    if student and rows and sid:
         with db() as conn:
             settings_put(conn, "onboarding_viewed_answer", {
-                "snapshot_id": active["id"], "student": student, "node": node,
+                "snapshot_id": sid, "student": student, "node": node,
                 "indicator": indicator, "event": rows[0]["作答事件编号"],
                 "group": data["模拟学生"].get(student, {}).get("模拟班级编号", ""),
             })
@@ -1031,6 +1156,13 @@ class Binding(BaseModel):
     label: str = Field(min_length=1, max_length=80)
     webhook: str
     secret: str = ""
+
+
+@app.get("/api/deliveries/binding/{student}")
+def delivery_binding(student: str):
+    with db() as conn:
+        item = get(conn, "binding", student)
+        return {"label": item["label"] if item else ""}
 
 
 @app.put("/api/deliveries/binding/{student}")

@@ -1,8 +1,10 @@
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import httpx
 
+from backend.cleaning_agent import CleaningReview, structured_review
 from backend.model_transport import ModelRequestError, ModelTransport, response_code
 from backend.recommendation_review import FinalReview, representative_events, review_in_groups
 
@@ -52,6 +54,15 @@ class ModelTransportTests(unittest.TestCase):
         with patch("backend.model_transport.request_budget", return_value=1):
             code, calls, _ = self.call([])
         self.assertEqual((code, calls), ("context", 0))
+
+    def test_structured_responses_distinguish_empty_invalid_json_and_invalid_schema(self):
+        for content, expected in [("", "empty"), ("{oops}", "json"), ("{}", "schema")]:
+            with self.subTest(expected=expected):
+                model = SimpleNamespace(generate=lambda _: SimpleNamespace(content=content))
+                with patch("backend.cleaning_agent.configured_model", return_value=model):
+                    with self.assertRaises(ModelRequestError) as failed:
+                        structured_review(CleaningReview, "", {}, "test")
+                self.assertEqual(failed.exception.code, expected)
 
     def test_representative_samples_keep_anchor_and_cover_score_bands(self):
         rows = {str(index): {"得分": score, "满分": 10, "节点编号": node}

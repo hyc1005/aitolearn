@@ -3,7 +3,8 @@ import { Alert, Button, Card, Drawer, Empty, Input, Popover, Select, Space, Tag,
 import { ArrowUpOutlined, CloseOutlined, PlusOutlined } from '@ant-design/icons'
 import { ActiveStatus } from './ActiveStatus'
 import { AnswerEvidence, type Answer } from './AnswerEvidence'
-import type { Api, ModelAccess } from './ModelAccess'
+import { effortLabel, json, type Api, type ModelAccess, type ModelChoice } from './ModelAccess'
+import { ChatMenu } from './ChatMenu'
 
 type Citation = { id: string; title: string; locator: string; material: string; text: string; bbox?: number[] }
 type Source = { title: string; locator: string } & (
@@ -17,6 +18,7 @@ type CardData = {
 }
 type Result = {
   answer: string; parts: Part[]; model?: string; cards?: CardData[]
+  model_call?: ModelChoice; selection?: ModelChoice
   trace?: { tool: string; status: string; count?: number | null; student?: string; group?: string; node?: string; indicator?: string }[]
   mode?: string
   snapshot_id?: string; session_id?: string; context?: Context
@@ -55,6 +57,13 @@ function write(key: string, value: string, storage: Storage) {
 }
 
 
+function greeting() {
+  const hour = new Date().getHours()
+  const time = hour < 6 ? '凌晨好' : hour < 11 ? '早上好' : hour < 14 ? '中午好' : hour < 19 ? '下午好' : '晚上好'
+  const choices = [time + '，今天想了解什么？', time + '，想先看看哪次测验？', '今天想了解什么？']
+  return choices[Math.floor(Math.random() * choices.length)]
+}
+
 export function LearningChat(props: Props) {
   const { api, students, groups, nodes, access } = props
   const [context, setContext] = useState<Context>({ student: '', group: '', node: '' })
@@ -63,39 +72,83 @@ export function LearningChat(props: Props) {
   const [busy, setBusy] = useState(false)
   const [sessionId, setSessionId] = useState(() => read(SESSION_KEY, localStorage))
   const [source, setSource] = useState<Answer>()
+  const [sourceRows, setSourceRows] = useState<Answer[]>([])
   const [restoring, setRestoring] = useState(Boolean(sessionId))
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerKind, setPickerKind] = useState<'student' | 'group'>('student')
   const bottom = useRef<HTMLDivElement>(null)
   const pendingProposals = useRef(new Set<string>())
-  const provider = access?.providers.find(item => item.id === access.active)
+  const [welcome, setWelcome] = useState(greeting)
+  const [choice, setChoice] = useState<ModelChoice>()
+  const [legacyProvider, setLegacyProvider] = useState<string>()
+  const [savingChoice, setSavingChoice] = useState(false)
+  const [choiceError, setChoiceError] = useState('')
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [sessions, setSessions] = useState<{ id: string; title: string }[]>()
+  const [historyError, setHistoryError] = useState('')
+  const models = (access?.connections || []).filter(c => c.configured).flatMap(c => c.models
+    .filter(m => m.enabled && m.verified.includes('default')).map(m => ({ ...m, connection: c, key: JSON.stringify([c.id, m.id]) })))
+  const legacyModel = models.find(m => m.connection.id === legacyProvider)
+  const preferred = choice || (legacyProvider ? legacyModel && {
+    connection_id: legacyProvider, model_id: legacyModel.id, effort: 'default',
+  } : access?.default && { ...access.default, effort: 'default' })
+  const selected = models.find(m => m.connection.id === preferred?.connection_id && m.id === preferred.model_id)
+  const efforts = selected?.efforts.filter(e => selected.connection.adapter !== 'custom' || selected.verified.includes(e)) || []
+  const stale = !!access && (!!choice && (!selected || !efforts.includes(choice.effort)) || !!legacyProvider && !choice && !selected)
+
+  async function choose(next: ModelChoice) {
+    if (savingChoice) return
+    setChoiceError('')
+    if (!sessionId) { setChoice(next); return }
+    setSavingChoice(true)
+    try { setChoice(await api(`/chat/sessions/${sessionId}/selection`, json('PUT', next))) }
+    catch (error) { setChoiceError((error as Error).message) }
+    finally { setSavingChoice(false) }
+  }
   const contextLabel = context.student || context.group || ''
 
-  useEffect(() => {
-    if (!sessionId) return
+  function restoreSession(id: string) {
     let active = true
-    void api(`/chat/sessions/${sessionId}`).then(session => {
+    void api(`/chat/sessions/${id}`).then(session => {
       if (!active) return
+      setSessionId(session.id)
+      write(SESSION_KEY, session.id, localStorage)
+      setChoice(session.selection)
+      setLegacyProvider(session.provider)
+      setChoiceError('')
       setContext({ ...{ student: '', group: '', node: '' }, ...(session.context || {}) })
       setTurns((session.turns || []).map((turn: any) => ({
         question: turn.question,
         context: turn.context,
-        result: { answer: turn.answer, parts: turn.parts || [], cards: turn.cards || [],
+        result: { answer: turn.answer, parts: turn.parts || [], cards: turn.cards || [], model_call: turn.model_call, model: turn.model,
           trace: turn.trace, mode: turn.mode, snapshot_id: turn.snapshot_id, session_id: session.id },
       })))
     }).catch(error => {
       if (active) {
-        setSessionId('')
-        if (error.status === 404) {
+        setHistoryError(error.message)
+        if (error.status === 404 && id === sessionId) {
+          setSessionId('')
           write(SESSION_KEY, '', localStorage)
           write('aitolearn.import.question', '', sessionStorage)
         }
       }
     }).finally(() => { if (active) setRestoring(false) })
     return () => { active = false }
-    // The session is restored once per page load.
+  }
+
+  useEffect(() => {
+    if (sessionId) return restoreSession(sessionId)
+    // Restore the persisted conversation on mount. The history picker restores on demand.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  async function showHistory(open: boolean) {
+    setHistoryOpen(open)
+    if (!open) return
+    setHistoryError('')
+    try { setSessions(await api('/chat/sessions')) }
+    catch (error) { setHistoryError((error as Error).message) }
+  }
 
   useEffect(() => {
     if (props.active && turns.length) bottom.current?.scrollIntoView({ block: 'end' })
@@ -147,7 +200,7 @@ export function LearningChat(props: Props) {
 
   async function send(question: string, override?: Partial<Context>, history = turns) {
     question = question.trim()
-    if (!question || busy || restoring) return
+    if (!question || busy || restoring || savingChoice || stale) return
     const outgoing: Context = { ...context, ...override }
     setBusy(true)
     setDraft('')
@@ -159,9 +212,11 @@ export function LearningChat(props: Props) {
         body: JSON.stringify({
           question,
           session_id: sessionId,
+          ...(preferred || {}),
           snapshot_id: outgoing.snapshot_id ?? props.snapshot ?? '',
           context_changed: true,
           use_tools: true,
+          use_configured_models: true,
           student: outgoing.student,
           group: outgoing.group,
           node: outgoing.node,
@@ -172,6 +227,7 @@ export function LearningChat(props: Props) {
         }),
       })
       if (result.session_id) { setSessionId(result.session_id); write(SESSION_KEY, result.session_id, localStorage) }
+      if (result.selection) setChoice(result.selection)
       if (result.context) setContext({ ...result.context, anchor_event: '' })
       setTurns([...history, { question, context: outgoing, result }])
       if (!props.snapshot && result.cards?.some(card => card.kind === 'import'))
@@ -187,6 +243,12 @@ export function LearningChat(props: Props) {
   }
 
   function newChat() {
+    setWelcome(greeting())
+    if (savingChoice) return
+    setChoice(undefined)
+    setLegacyProvider(undefined)
+    setChoiceError('')
+    setHistoryOpen(false)
     setTurns([])
     setContext({ student: '', group: '', node: '' })
     setSessionId('')
@@ -202,10 +264,10 @@ export function LearningChat(props: Props) {
     setPickerOpen(false)
   }
 
-  async function readEvidence(student: string, node: string, indicator: string, snapshot?: string, group = '', item = '') {
+  async function readEvidence(student: string, node: string, indicator: string, snapshot?: string, group = '', item = '', includeUnscored = false) {
     try {
-      const rows = await api(`/profiles/evidence?${new URLSearchParams({ student, group, node, indicator, item, snapshot_id: snapshot || props.snapshot || '' })}`)
-      if (rows[0]) setSource(rows[0])
+      const rows = await api<Answer[]>(`/profiles/evidence?${new URLSearchParams({ student, group, node, indicator, item, snapshot_id: snapshot || props.snapshot || '', include_unscored: String(includeUnscored) })}`)
+      if (rows[0]) { setSourceRows(rows); setSource(rows[0]) }
       else window.alert('该指标暂无有效作答')
     } catch (error) { window.alert((error as Error).message) }
   }
@@ -254,6 +316,7 @@ export function LearningChat(props: Props) {
     setContext({ ...context, ...override })
     const question = card.intent === 'generate_recommendation'
       ? `帮我为 ${option.id} 生成学习建议`
+      : card.intent === 'progress' ? `看看 ${option.id} 的 ${card.indicator} 有没有进步${card.teaching ? '，教材怎么讲？' : '？'}`
       : `看看 ${option.id} 的表现`
     void send(question, { ...override, snapshot_id: card.snapshot_id || context.snapshot_id })
   }
@@ -267,12 +330,22 @@ export function LearningChat(props: Props) {
   return <section aria-label="学情对话" className={turns.length ? "learning-chat" : "learning-chat chat-is-empty"}>
     <div className="chat-toolbar">
       <Space wrap>
-        <Button type="text" onClick={props.openAccess}>{provider ? provider.model + (provider.configured ? '' : ' · 待配置') : '模型接入'}</Button>
+        <Popover trigger="click" open={historyOpen} onOpenChange={showHistory} content={<div className="chat-history">
+          {historyError && <Alert type="error" title={historyError} />}
+          {!historyError && !sessions && <p>正在读取会话</p>}
+          {sessions?.length === 0 && <p>暂无历史会话</p>}
+          {sessions?.map(session => <Button key={session.id} type="text" disabled={session.id === sessionId}
+            onClick={() => {
+              setHistoryOpen(false); setRestoring(true); setDraft(''); restoreSession(session.id)
+            }}>{session.title}</Button>)}
+        </div>}>
+          <Button disabled={busy || restoring || savingChoice}>最近对话</Button>
+        </Popover>
         <Button disabled={busy || restoring || (!turns.length && !draft && !contextLabel && !context.node)} onClick={newChat}>新对话</Button>
       </Space>
     </div>
     {restoring && <ActiveStatus label="正在恢复对话" />}
-    {!restoring && !turns.length && <h1 className="chat-welcome">今天想了解什么？</h1>}
+    {!restoring && !turns.length && <h1 className="chat-welcome">{welcome}</h1>}
     <div className="chat-thread" aria-label="学情对话记录">
       {turns.map((turn, index) => <article key={index} className="chat-turn">
         <p className="chat-question">{turn.question}</p>
@@ -287,6 +360,8 @@ export function LearningChat(props: Props) {
             </Space>
           </>}
         </div> : turn.result ? <div>
+          {turn.result.model_call ? <small>{turn.result.model_call.model_id} · {turn.result.model_call.connection_name} · {effortLabel[turn.result.model_call.effort]}</small>
+            : turn.result.model && <small>{turn.result.model}</small>}
           {turn.result.answer && <p className="preserve">{turn.result.answer}</p>}
           {(turn.result.cards || []).filter(card => card.kind !== 'profile').map((card, cardIndex) => <ResultCard key={card.id || cardIndex} card={card}
             api={api} snapshot={turn.result?.snapshot_id || props.snapshot}
@@ -322,7 +397,7 @@ export function LearningChat(props: Props) {
           {(turn.result.parts || []).map(({ quote, source }, id) =>
             <blockquote key={id}>
               <p className="preserve">{quote}</p>
-              <Button type="link" onClick={() => source.kind === 'answer' ? setSource(source.answer) : props.openCitation(source.citation)}>
+              <Button type="link" onClick={() => source.kind === 'answer' ? (setSourceRows([]), setSource(source.answer)) : props.openCitation(source.citation)}>
                 {source.title} · {source.locator}
               </Button>
             </blockquote>)}
@@ -331,6 +406,7 @@ export function LearningChat(props: Props) {
       <div ref={bottom} />
     </div>
     <div className="chat-composer-dock"><form className="chat-composer" onSubmit={submit}>
+      {(stale || choiceError) && <p role="status">{choiceError || '本会话原模型或思考档位已不可用，请为下一条消息重选。'}</p>}
       <Input.TextArea aria-label="输入学情问题" placeholder={contextLabel ? `询问 ${contextLabel}，或说“帮我生成建议”` : '问一个问题，或说“看看 DC02 最近一次测验”'}
         variant="borderless" maxLength={1200} autoSize={{ minRows: 2, maxRows: 5 }} value={draft} onChange={event => setDraft(event.target.value)}
         onPressEnter={event => {
@@ -357,19 +433,31 @@ export function LearningChat(props: Props) {
         {context.group && <Tag closable closeIcon={<CloseOutlined />} onClose={() => setContext({ ...context, group: '' })}>班级 {context.group}</Tag>}
         {context.node && <Tag closable closeIcon={<CloseOutlined />} onClose={() => setContext({ ...context, node: '' })}>测验 {context.node}</Tag>}
       </Space>
-        <Button type="primary" shape="circle" htmlType="submit" aria-label="发送" title="发送"
-          loading={busy} icon={<ArrowUpOutlined />} disabled={restoring || !draft.trim()} />
+        <div className="chat-submit">
+          {models.length ? <ChatMenu label="当前会话模型" value={selected?.key} placeholder="选择模型" disabled={busy || restoring}
+            options={models.map(m => ({ id: m.key, label: m.id + (models.some(v => v.id === m.id && v.key !== m.key) ? ' · ' + m.connection.name : '') }))}
+            change={key => { const m = models.find(entry => entry.key === key); if (m) void choose({ connection_id: m.connection.id, model_id: m.id, effort: 'default' }) }} />
+            : <Button type="text" onClick={props.openAccess}>模型接入</Button>}
+          <ChatMenu label="思考强度" value={preferred?.effort} placeholder="思考强度" disabled={busy || restoring}
+            options={efforts.map(id => ({ id, label: effortLabel[id] || id }))}
+            change={effort => { if (selected) void choose({ connection_id: selected.connection.id, model_id: selected.id, effort }) }} />
+          <Button className="chat-send" type="primary" shape="circle" htmlType="submit" aria-label="发送" title="发送"
+            loading={busy} icon={<ArrowUpOutlined />} disabled={restoring || savingChoice || stale || !draft.trim()} />
+        </div>
       </div>
     </form></div>
-    <Drawer open={!!source} title="学生原始作答" size="min(850px, 100vw)" onClose={() => setSource(undefined)}>
-      {source && <AnswerEvidence answer={source} />}
+    <Drawer open={!!source} title="学生原始作答" size="min(850px, 100vw)" onClose={() => { setSource(undefined); setSourceRows([]) }}>
+      {sourceRows.length > 1 && <Select aria-label="选择作答事件" value={source?.作答事件编号}
+        options={sourceRows.map(row => ({ value: row.作答事件编号, label: [row.节点编号, row.材料编号, row.作答事件编号].join(' · ') }))}
+        onChange={event => setSource(sourceRows.find(row => row.作答事件编号 === event))} />}
+      {source && <AnswerEvidence key={source.作答事件编号} answer={source} />}
     </Drawer>
   </section>
 }
 
 function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, chooseCandidate, openProfile, openRun, openImport, openDraft, openPage }: {
   card: CardData; api: Api; snapshot?: string
-  readEvidence: (student: string, node: string, indicator: string, snapshot?: string, group?: string, item?: string) => void
+  readEvidence: (student: string, node: string, indicator: string, snapshot?: string, group?: string, item?: string, includeUnscored?: boolean) => void
   confirmProposal: (card: CardData) => void
   chooseCandidate: (option: Record<string, any>, card: CardData) => void
   openProfile: Props['openProfile']; openRun: Props['openRun']; openImport: Props['openImport']
@@ -388,6 +476,10 @@ function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, choose
   if (card.kind === 'candidates') return <Card size="small" className="chat-card" title="请选择对象">
     <p>{card.prompt}</p><Space wrap>{(card.options || []).map((option: Record<string, any>) =>
       <Button key={option.kind + option.id} onClick={() => chooseCandidate(option, card)}>{option.label}</Button>)}</Space>
+  </Card>
+  if (card.kind === 'progress') return <Card size="small" className="chat-card" title="按测验查看原始作答">
+    <Space wrap>{card.nodes.map((node: string) => <Button key={node}
+      onClick={() => readEvidence(card.student, node, card.indicator, card.snapshot_id, '', '', true)}>{node} · 原始作答</Button>)}</Space>
   </Card>
   if (card.kind === 'profile') return <Card size="small" className="chat-card"
     title={(card.target?.kind === 'student' ? '学生 ' : '班级 ') + card.target?.id + (card.node ? ' · ' + card.node : '')}
@@ -409,7 +501,7 @@ function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, choose
     }
     return <Card size="small" className="chat-card" title="本批清洗" extra={<Button onClick={() => openRun(card.run_id)}>打开任务详情</Button>}>
       <Space wrap><Tag color={card.state === 'failed' ? 'error' : card.state === 'done' ? 'success' : 'processing'}>
-        {({ queued: '排队', running: '清洗中', done: card.stage === 'confirm' ? '待确认' : '已完成', failed: '失败' } as Record<string, string>)[card.state] || card.state}
+        {({ queued: '排队', running: '清洗中', done: card.stage === 'confirm' ? '待确认' : '已完成', failed: '失败', stopped: '已停止' } as Record<string, string>)[card.state] || card.state}
       </Tag><Tag>{stageLabels[card.stage] || card.stage || '等待执行'}</Tag>{card.label && <Tag>{card.label}</Tag>}</Space>
       {report ? <div className="chat-counts">
         <span><strong>{report.raw_attempts}</strong>原始作答</span>
@@ -478,7 +570,7 @@ function ProposalTask({ id, api, openRun, openDraft, openPage }: Pick<Props, 'ap
     {task?.state === 'running' && <ActiveStatus label={({ snapshot: '读取快照', interpret: '学情解读',
       generate: '生成草稿', final_review: '模型终审' } as Record<string, string>)[task.stage || ''] || '正在处理任务'} />}
     {task?.state === 'running' && task.model_retrying && <Tag>正在重试</Tag>}
-    {task && task.state !== 'running' && <Tag>{({ queued: '排队中', running: '执行中', done: '已完成', failed: '失败' } as Record<string, string>)[task.state] || task.state}
+    {task && task.state !== 'running' && <Tag>{({ queued: '排队中', running: '执行中', done: '已完成', failed: '失败', stopped: '已停止' } as Record<string, string>)[task.state] || task.state}
 </Tag>}
     {task?.error && <Typography.Text type="danger">{task.error}</Typography.Text>}
     <Button onClick={() => task && !['clean', 'generate', 'recommendation_review'].includes(task.kind)

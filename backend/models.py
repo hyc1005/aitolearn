@@ -68,34 +68,59 @@ def complete_with_tools(provider, messages, session, **options):
     return _complete(provider, messages, session, True, **options)
 
 
+def model_name(provider):
+    return provider_config(provider)["model"] if isinstance(provider, str) else provider.model_id
+
+
 def _complete(provider, messages, session, structured, **options):
-    key = provider_key(provider)
+    selected = None if isinstance(provider, str) else provider
+    provider = selected.connection_id if selected else provider
+    key = selected.key if selected else provider_key(provider)
     if not key:
         raise ModelRequestError("credentials")
-    config = provider_config(provider)
+    config = {"model": selected.model_id, "base_url": selected.base_url} if selected else provider_config(provider)
     body = {"model": config["model"], "messages": messages, **options}
-    if provider == "deepseek":
+    direct = None
+    if selected:
+        body.update(selected.parameters())
+        if selected.adapter == "custom":
+            from .model_connections import BoundTransport
+            direct = BoundTransport()
+    elif provider == "deepseek":
         body["thinking"] = {"type": "disabled"}
     try:
-        with httpx.Client(transport=ModelTransport(provider, config["model"], session, base_url=config["base_url"]),
-                          timeout=httpx.Timeout(45, connect=8)) as client:
+        with httpx.Client(transport=ModelTransport(provider, config["model"], session, transport=direct,
+                                                   base_url=config["base_url"]),
+                          follow_redirects=False, timeout=httpx.Timeout(45, connect=8)) as client:
             response = client.post(config["base_url"].rstrip("/") + "/chat/completions",
-                                   headers={**model_headers(provider, session), "Authorization": f"Bearer {key}"},
+                                   headers={**model_headers(selected.adapter if selected else provider, session),
+                                            "Authorization": f"Bearer {key}"},
                                    json=body)
         response.raise_for_status()
         message = response.json()["choices"][0]["message"]
         content = message.get("content")
         if structured and (message.get("tool_calls") or isinstance(content, str) and content.strip()):
-            return {"role": "assistant", "content": content, **(
-                {"tool_calls": message["tool_calls"]} if message.get("tool_calls") else {})}
+            return {"role": "assistant", "content": content, **{
+                name: message[name] for name in ("tool_calls", "reasoning_content") if message.get(name)}}
         if not isinstance(content, str) or not content.strip():
             raise ValueError
         return content
     except httpx.HTTPStatusError as error:
-        if structured and error.response.status_code in {400, 422} and "tool" in error.response.text.lower():
+        status = error.response.status_code
+        if 300 <= status < 400:
+            raise ValueError(f"平台返回 HTTP {status} 重定向；请配置最终 API 地址") from None
+        detail = error.response.text[:2000].lower()
+        if selected and status in {400, 422}:
+            field = next((p for p in ("reasoning_effort", "thinking") if p in detail), None)
+            if field:
+                raise ValueError(f"平台拒绝思考参数 {field}（HTTP {status}），请检查模型档位配置") from None
+        if structured and status in {400, 422} and "tool" in detail:
             raise ToolsUnavailable("当前模型不支持工具调用") from None
-        raise ModelRequestError(response_code(error.response)) from None
+        failure = ModelRequestError(response_code(error.response))
+        if selected:
+            raise ValueError(f"{failure}（HTTP {status}）") from None
+        raise failure from None
     except ModelRequestError:
         raise
-    except (KeyError, IndexError, TypeError, ValueError):
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
         raise ModelRequestError("response") from None

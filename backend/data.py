@@ -24,6 +24,29 @@ def split(value):
     return [part.strip() for part in re.split("[、,，；;]", value) if part.strip()]
 
 
+def open_import_workbook(raw):
+    with ZipFile(io.BytesIO(raw)) as archive:
+        if sum(entry.file_size for entry in archive.infolist()) > 150_000_000:
+            raise ValueError("工作簿解压体积过大")
+    return load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+
+
+def import_headers(filename, raw):
+    if filename.lower().endswith(".csv"):
+        try:
+            contents = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            contents = raw.decode("gb18030")
+        return [next(csv.reader(io.StringIO(contents, newline="")), [])]
+    if filename.lower().endswith(".xlsx"):
+        book = open_import_workbook(raw)
+        try:
+            return [next(sheet.values, ()) for sheet in list(book)[:20]]
+        finally:
+            book.close()
+    return []
+
+
 def read_file(filename, raw, mapping=None):
     def table(sheet, headers, values, first_line):
         headers = [(mapping or {}).get(str(h or "").strip(), str(h or "").strip()) for h in headers]
@@ -43,10 +66,7 @@ def read_file(filename, raw, mapping=None):
         return rows
 
     if filename.lower().endswith(".xlsx"):
-        with ZipFile(io.BytesIO(raw)) as archive:
-            if sum(entry.file_size for entry in archive.infolist()) > 150_000_000:
-                raise ValueError("工作簿解压体积过大")
-        book = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        book = open_import_workbook(raw)
         try:
             result = []
             for sheet in book:

@@ -3,9 +3,10 @@ import re
 
 from pydantic import BaseModel, Field
 
-from .models import active_provider, complete, provider_config
+from .models import active_provider, complete, model_name
 from .search import search, terms
 from .snapshots import table_data
+from .student_query import answer_rows
 
 STUDENT_CONTEXT = re.compile(r"[这该那][位名]?学生|[他她]的表现|失分|得了几分|最终填写|学情")
 ITEM_ID = re.compile(r"(?<![A-Z0-9])Q\d+(?![A-Z0-9])")
@@ -26,7 +27,12 @@ class ChatRequest(BaseModel):
     node: str = Field(default="", max_length=128)
     session_id: str = Field(default="", max_length=128)
     anchor_event: str = Field(default="", max_length=128)
+    provider: str | None = Field(default=None, max_length=40)
+    connection_id: str | None = Field(default=None, max_length=40)
+    model_id: str | None = Field(default=None, max_length=180)
+    effort: str | None = Field(default=None, max_length=16)
     use_tools: bool = False
+    use_configured_models: bool = False
     context_changed: bool = False
 
 
@@ -52,12 +58,9 @@ def collect_sources(conn, snapshot, request):
     vocabulary = {term for term in terms(query) if len(term) > 1}
     asks_about_student = bool(STUDENT_CONTEXT.search(query))
     candidates = []
-    for event_id, row in tables["作答记录"].items():
-        if row["学生编号"] != request.student or (request.node and row["节点编号"] != request.node):
-            continue
-        if row["评分状态"] != "已评分":
-            continue
-        item = tables["题目与材料"].get(row["材料编号"], {})
+    matches = answer_rows(conn, snapshot["id"], student=request.student, node=request.node, scored_only=True)
+    for row in matches:
+        event_id, item = row["作答事件编号"], row["题目"]
         passage = " · ".join(filter(None, [row["材料编号"], item.get("题干或内容")]))
         body = "\n".join(filter(None, [
             passage,
@@ -93,8 +96,8 @@ def model_history(request):
             for turn in history]
 
 
-def reply(request, sources, session):
-    provider = active_provider()
+def reply(request, sources, session, selected=None):
+    provider = selected or request.provider or active_provider()
     sources = sources[:8]
     evidence = [{"id": index, "kind": source["kind"], "locator": source["locator"],
                  "text": source["text"][:800]} for index, source in enumerate(sources)]
@@ -152,5 +155,5 @@ def validated_reply(request, sources, evidence, content, provider, *, require_st
     else:
         proposal = {key: str(proposal.get(key, "") or "")[:128]
                     for key in ("type", "student", "group", "node")}
-    return {"answer": answer, "parts": parts, "model": provider_config(provider)["model"],
+    return {"answer": answer, "parts": parts, "model": model_name(provider),
             **({"proposal": proposal} if proposal else {})}

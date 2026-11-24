@@ -1,5 +1,6 @@
 import React from 'react'
 import { Alert, Button, Card, Empty, Space, Steps, Table, Tag, Typography } from 'antd'
+import { AnswerEvidence } from './AnswerEvidence'
 import { CleaningCounts, issueFilters } from './CleaningCounts'
 import { ActiveStatus } from './ActiveStatus'
 import { DiagnosisBoard } from './DiagnosisBoard'
@@ -25,17 +26,24 @@ const checks: Record<string, string> = {
 
 export function runStatus(run: Row) {
   if (run.state === 'failed') return '失败 · ' + (stageNames[run.stage] || '等待执行')
+  if (run.state === 'stopped') return '已停止'
+  if (run.stop_requested) return '将在当前阶段结束后停止'
   if (run.state === 'queued') return '排队'
   return stageNames[run.stage] || '处理中'
 }
 
-export function ReviewPanel({ review, openRef, canOpenRef, collapseDetails }: {
-  review: Row; openRef?: (ref: string) => void; canOpenRef?: (ref: string) => boolean; collapseDetails?: boolean
+export function ReviewPanel({ review, openRef, canOpenRef, collapseDetails, indicators }: {
+  indicators?: Record<string, Row>; review: Row; openRef?: (ref: string) => void; canOpenRef?: (ref: string) => boolean; collapseDetails?: boolean
 }) {
   const details = <>
     <Typography.Paragraph className="spaced preserve">{review.summary}</Typography.Paragraph>
     {(review.findings || review.claims || []).map((finding: Row, index: number) =>
       <div key={index} className="spaced">
+        {indicators?.[finding.refs[0]] && (() => {
+          const item = indicators[finding.refs[0]]
+          return <Space wrap><Typography.Text strong>{item.label}</Typography.Text>
+            <Tag>覆盖 {item.coverage}/{item.population} 人</Tag><Tag>{item.n} 条有效作答</Tag></Space>
+        })()}
         <Typography.Paragraph>{finding.detail}</Typography.Paragraph>
         <Space wrap>{finding.refs.map((ref: string) => openRef && canOpenRef?.(ref)
           ? <Button key={ref} size="small" type="link" onClick={() => openRef(ref)}>{ref}</Button>
@@ -58,20 +66,22 @@ type Props = {
   jobs: Row[]; detail?: Row; runId: string; loading: boolean; error: string; legacy: boolean
   caseAvailable: boolean
   open: (key: string) => void; migrate: () => void; confirm: () => void; rebase: () => void
-  retry: () => void; openDraft: (key: string) => void; openImport: () => void; openReplay: () => void
+  retry: () => void; control: (action: string) => void; openDraft: (key: string) => void; openImport: () => void; openReplay: () => void
 }
 
 export default function AgentWorkbench(props: Props) {
   const [activeRef, setActiveRef] = React.useState('')
+  const [archived, setArchived] = React.useState(false)
   const { detail: run, runId } = props
   const priority = (item: Row) => item.stage === 'confirm' && item.state === 'done' ? 0 :
     ['running', 'queued'].includes(item.state) ? 1 : item.state === 'failed' ? 2 : 3
   if (!runId) return <Card title="运行记录" extra={<Space wrap>
     {props.caseAvailable && <Button onClick={props.openReplay}>Q015 案例回放</Button>}
     {props.legacy && <Button onClick={props.migrate} loading={props.loading}>迁移历史批次</Button>}
+    <Button onClick={() => setArchived(!archived)}>{archived ? "查看未归档" : "查看已归档"}</Button>
     <Button type="primary" onClick={props.openImport}>导入学情</Button>
   </Space>}>
-    <Table<Row> rowKey="id" dataSource={props.jobs.filter(job => runNames[job.kind]).sort((a, b) => priority(a) - priority(b))}
+    <Table<Row> rowKey="id" dataSource={props.jobs.filter(job => runNames[job.kind] && !!job.archived === archived).sort((a, b) => priority(a) - priority(b))}
       locale={{ emptyText: <Empty description="导入数据或生成建议后，这里会显示每个阶段。" /> }}
       columns={[
         { title: '任务', render: (_, row) => runNames[row.kind] },
@@ -109,7 +119,12 @@ export default function AgentWorkbench(props: Props) {
         {run.state === 'running' ? <ActiveStatus label={runStatus(run) + (run.model_retrying ? ' · 正在重试' : '')} /> : <Tag>{runStatus(run)}</Tag>}
         {run.state === 'failed' && ['credentials', 'configuration', 'quota'].includes(run.model_error) &&
           <Button onClick={props.openSettings}>检查模型设置</Button>}
-        {run.state === 'failed' && <Button onClick={props.retry} loading={props.loading}>重试当前阶段</Button>}
+        {['queued', 'running'].includes(run.state) && <Button disabled={run.stop_requested} loading={props.loading}
+          onClick={() => props.control('stop')}>{run.state === 'queued' ? '取消排队' : '完成当前阶段后停止'}</Button>}
+        {['failed', 'stopped'].includes(run.state) && <Button onClick={props.retry} loading={props.loading}>
+          {run.state === 'stopped' ? '继续任务' : '重试当前阶段'}</Button>}
+        {['done', 'failed', 'stopped'].includes(run.state) && <Button loading={props.loading}
+          onClick={() => props.control(run.archived ? 'unarchive' : 'archive')}>{run.archived ? '取消归档' : '归档'}</Button>}
         {clean && outdated && !run.correction && <Button onClick={props.rebase} loading={props.loading}>按当前数据重跑</Button>}
         {clean && run.state === 'done' && run.stage === 'confirm' && !outdated &&
           <Button type="primary" onClick={props.confirm} loading={props.loading}>确认并启用快照</Button>}
@@ -140,25 +155,30 @@ export default function AgentWorkbench(props: Props) {
     </Card>}
     {['clean_review', 'interpret', 'final_review'].map(stage => stages[stage] && <Card
       title={stage === 'interpret' ? '模型解读与引用样例' : stageNames[stage]} key={stage}>
+      {stage === 'clean_review' && report && Object.keys(report.issue_counts || {}).length > 0 &&
+        <div className="spaced">{Object.entries(report.issue_counts).map(([label, count]) =>
+          <div className="issue-frequency" key={label}><span>{label}</span>
+            <meter aria-label={label} min={0} max={report.issues.length} value={Number(count)} />
+            <strong>{String(count)} 条</strong></div>)}</div>}
       <ReviewPanel review={stages[stage]} openRef={setActiveRef}
+        indicators={stage === 'interpret' ? run.interpret_indicators : undefined}
         collapseDetails={stage === 'clean_review' && stages[stage].decision === 'ready'}
         canOpenRef={ref => stage !== 'final_review' &&
           !!(run.linked_evidence?.[ref] || report?.issues.some((r: Row) => r.id === ref))} />
       {stage === 'clean_review' && selectedIssue && <Alert className="spaced" message={selectedIssue.id + ' · ' + selectedIssue.reason}
         description={[selectedIssue.source, selectedIssue.sheet, '第 ' + selectedIssue.line + ' 行', selectedIssue.field].filter(Boolean).join(' · ')} />}
-      {stage === 'interpret' && selectedEvidence && <Card type="inner" className="spaced"
-        title={selectedEvidence.材料编号 + ' · ' + selectedEvidence.得分 + '/' + selectedEvidence.满分}>
-        <Typography.Paragraph>{selectedEvidence.题目.题干或内容}</Typography.Paragraph>
-        <Typography.Paragraph className="preserve">{selectedEvidence.解答过程}</Typography.Paragraph>
-        <Typography.Paragraph>最终作答 {selectedEvidence.学生最终作答} · {selectedEvidence.评分点得分}</Typography.Paragraph>
-        <Typography.Text type="secondary">{selectedEvidence.来源.source} · {selectedEvidence.来源.sheet} · 第 {selectedEvidence.来源.line} 行</Typography.Text>
-      </Card>}
+      {stage === 'interpret' && selectedEvidence && <AnswerEvidence key={activeRef} answer={selectedEvidence as Parameters<typeof AnswerEvidence>[0]['answer']} />}
       {stages[stage].trace && <details><summary>查看工具输出</summary><pre className="preserve">{JSON.stringify(stages[stage].trace, null, 2)}</pre></details>}
     </Card>)}
     {stages.generate && <Card title="生成草稿" extra={<Tag>{stages.generate.model}</Tag>}>
       <details><summary>查看工具调用</summary><pre className="preserve">{JSON.stringify(stages.generate.trace, null, 2)}</pre></details>
     </Card>}
     {!!run.failures?.length && <Card title="失败记录">{run.failures.map((entry: Row, index: number) =>
-      <Typography.Paragraph key={index}>{new Date(entry.at * 1000).toLocaleString('zh-CN')} · {stageNames[entry.stage]} · {entry.error}</Typography.Paragraph>)}</Card>}
+      <div key={index} className="spaced">
+        <div>{new Date(entry.at * 1000).toLocaleString('zh-CN')} · {stageNames[entry.stage]} · {entry.error}</div>
+        {entry.request && <Typography.Text type="secondary">
+          {[entry.request.model, entry.request.bytes + ' 字节', entry.request.finish_reason].filter(Boolean).join(' · ')}
+        </Typography.Text>}
+      </div>)}</Card>}
   </>
 }

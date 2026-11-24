@@ -9,7 +9,7 @@ import json
 import re
 import time
 
-from .data import profile
+from .student_query import profile
 from .models import active_provider, provider_key
 from .snapshots import current_snapshot, table_data
 from .store import all_of, get, new_id, put
@@ -75,8 +75,8 @@ def resolve(data, question, context=None):
             "candidates": candidates, "students": students, "groups": groups, "nodes": nodes}
 
 
-def profile_card(data, snapshot_id, student="", group="", node="", item=""):
-    snapshot = profile(data, student=student, group=group, node=node, include_question_scope=True)
+def profile_card(conn, data, snapshot_id, student="", group="", node="", item=""):
+    snapshot = profile(conn, snapshot_id, data, student=student, group=group, node=node, include_question_scope=True)
     axes = sorted(snapshot["axes"], key=lambda axis: (axis["score"] is None, axis["score"] or 0))
     topic = ""
     if item:
@@ -250,7 +250,7 @@ def deterministic(conn, request, snapshot):
                 {"kind": "candidates", "intent": "view", "options": resolved["candidates"], "prompt": "请选择对象"}]}
         student, group = resolved["student"], resolved["group"]
         if student or group:
-            card = profile_card(data, snapshot["id"], student, group, resolved["node"], resolved["item"])
+            card = profile_card(conn, data, snapshot["id"], student, group, resolved["node"], resolved["item"])
             return {"answer": summary_answer(card, question), "cards": [card]}
     return None
 
@@ -263,7 +263,9 @@ def save_session(conn, session_id, request, result):
                    "context": {"student": "", "group": "", "node": ""}}
     context = {"student": request.student, "group": request.group, "node": request.node}
     for card in result.get("cards", []):
-        if card.get("kind") == "profile" and card.get("target"):
+        if card.get("kind") == "progress":
+            context = {"student": card["student"], "group": "", "node": ""}
+        elif card.get("kind") == "profile" and card.get("target"):
             context = {"student": card["target"]["id"] if card["target"].get("kind") == "student" else "",
                        "group": card["target"]["id"] if card["target"].get("kind") == "group" else "",
                        "node": card.get("node", "")}
@@ -275,9 +277,13 @@ def save_session(conn, session_id, request, result):
     turn = {"question": request.question, "answer": result.get("answer", ""), "parts": result.get("parts", []),
             "trace": result.get("trace", []), "mode": result.get("mode"), "context": context,
             "cards": result.get("cards", []), "snapshot_id": result.get("snapshot_id", ""),
-            "model": result.get("model", ""), "at": now}
+            "model": result.get("model", ""), "model_call": result.get("model_call"), "at": now}
     session["turns"] = (session.get("turns", []) + [turn])[-MAX_TURNS:]
     session["context"] = context
+    if result.get("selection"):
+        session["selection"] = result["selection"]
+    if request.provider:
+        session["provider"] = request.provider
     session["updated"] = now
     put(conn, "chat_session", session["id"], session)
     return session

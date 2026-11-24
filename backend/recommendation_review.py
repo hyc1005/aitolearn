@@ -67,17 +67,39 @@ def interpret(tables, payload, session):
         "有有效作答时使用作答支持判断，样本不足只提出观察。单次失误不得推广为稳定困难。"
         "anchor_event 非空时至少一条结论引用该作答事件。无证据时 claims 留空，summary 说明需要补充什么。"
     )
+    try:
+        return interpret_facts(facts, instruction, session, payload["snapshot_id"])
+    except ModelRequestError as error:
+        if error.code != "context":
+            raise
+        for axis in facts["axes"].values():
+            axis["sample_ids"] = axis["sample_ids"][:1]
+        used = {key for axis in facts["axes"].values() for key in axis["sample_ids"]}
+        facts["samples"] = {key: sample for key, sample in samples.items() if key in used}
+        return interpret_facts(facts, instruction, f"{session}-compact", payload["snapshot_id"])
+
+
+def interpret_facts(facts, instruction, session, snapshot_id):
+    axes = facts["axes"]
+    anchor = facts["anchor_event"]
+    candidates = {key: axis["sample_ids"] for key, axis in axes.items()}
     for attempt in range(2):
-        review, model = structured_review(Interpretation, instruction, facts, f"{session}-interpret-{attempt}")
+        try:
+            review, model = structured_review(Interpretation, instruction, facts, f"{session}-interpret-{attempt}")
+        except ModelRequestError as error:
+            if attempt or error.code not in {"json", "schema"}:
+                raise
+            instruction += f" 上次输出需要修正：{error}。"
+            continue
         covers_anchor = not anchor or any(anchor in claim.evidence_ids for claim in review.claims)
         if covers_anchor and all(claim.indicator_id in candidates
                and set(claim.evidence_ids) <= set(candidates[claim.indicator_id])
                and (claim.evidence_ids or not axes[claim.indicator_id]["n"]) for claim in review.claims):
             return {"summary": review.summary, "claims": [
                 {"detail": claim.detail, "refs": [claim.indicator_id, *claim.evidence_ids]} for claim in review.claims
-            ], "model": model, "input_version": payload["snapshot_id"]}
+            ], "model": model, "input_version": snapshot_id}
         instruction += " 上次输出引用有误。只使用同一指标内实际列出的事件编号。"
-    raise ValueError("学情结论引用了不属于该指标的作答")
+    raise ModelRequestError("reference")
 
 
 def preview_text(draft):
@@ -134,14 +156,20 @@ def final_review(draft, session):
 
 def review_checks(facts, instruction, session):
     for attempt in range(2):
-        review, model = structured_review(FinalReview, instruction, facts, f"{session}-{attempt}")
+        try:
+            review, model = structured_review(FinalReview, instruction, facts, f"{session}-{attempt}")
+        except ModelRequestError as error:
+            if attempt or error.code not in {"json", "schema"}:
+                raise
+            instruction += f" 上次输出需要修正：{error}。"
+            continue
         expected = "revise" if "revise" in review.checks.values() else "pass"
         if (review.checks.keys() == facts["checks"].keys() and review.decision == expected
                 and (expected != "revise" or review.findings)
                 and all(set(item.refs) <= set(facts["allowed_refs"]) for item in review.findings)):
             return review, model
         instruction += " 上次输出与结构或依据不匹配。仅使用本组 checks 中的键和 allowed_refs 中的引用。"
-    raise ValueError("终审意见缺少检查项或使用了无效引用")
+    raise ModelRequestError("reference")
 
 
 def review_in_groups(facts, instruction, session):

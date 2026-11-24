@@ -5,10 +5,11 @@ from time import monotonic
 
 from .conversation import (CORRECTION_FIELDS, LATEST, NODE_ID, RECOMMEND, VIEW, cleaning_card, latest_clean, make_proposal, material_version, profile_card,
                            proposal_card, resolve, resolve_recommendation, summary_answer)
-from .data import profile, split
+from .data import split
 from .learning_chat import model_history, validated_reply
 from .model_transport import ModelRequestError
-from .models import complete_with_tools, provider_config
+from .models import complete_with_tools, model_name
+from .student_query import answer_rows
 from .search import search
 from .snapshots import table_data
 from .store import all_of, db, get, new_id
@@ -119,7 +120,8 @@ class ChatTools:
     def read_profile(self):
         if not self.scope:
             return {"status": "scope_required"}
-        self.profile = profile_card(self.data, **self.target(), item=self.scope["item"])
+        with db() as conn:
+            self.profile = profile_card(conn, self.data, **self.target(), item=self.scope["item"])
         self.cards.append(self.profile)
         axes = [{key: axis[key] for key in ("id", "label", "score", "coverage", "population", "n", "status")}
                 for axis in self.profile["indicators"]]
@@ -136,14 +138,12 @@ class ChatTools:
         if not self.profile or indicator not in {axis["id"] for axis in self.profile["indicators"]}:
             return {"status": "profile_indicator_required"}
         target = self.target()
-        stats = profile(self.data, student=target["student"], group=target["group"], node=target["node"])
-        axis = next(axis for axis in stats["axes"] if axis["id"] == indicator)
         rows = []
-        attempts = ((key, self.data["作答记录"][key]) for key in axis["attempt_ids"])
-        for key, row in attempts:
-            if self.scope["item"] and row["材料编号"] != self.scope["item"]:
-                continue
-            item = self.data["题目与材料"].get(row["材料编号"], {})
+        with db() as conn:
+            attempts = answer_rows(conn, target["snapshot_id"], target["student"], target["group"], target["node"],
+                                   self.scope["item"], scored_only=True, skill=indicator, limit=3)
+        for row in attempts:
+            key, item = row["作答事件编号"], row["题目"]
             excerpt = "\n".join(filter(None, [row["材料编号"], item.get("题干或内容"),
                 f"得分 {row['得分']}/{row['满分']}", row.get("解答过程"), row.get("学生最终作答")]))
             rows.append({**self.add_source({"kind": "answer", "title": row["材料编号"], "locator": "原始作答",
@@ -354,10 +354,10 @@ def run_chat(request, snapshot, provider):
                           **{key: output[key] for key in ("student", "group", "node", "snapshot_id", "indicator") if key in output}})
             if tools.paused:
                 return {"answer": output["message"], "parts": [], "cards": tools.cards, "trace": trace,
-                        "model": provider_config(provider)["model"]}
+                        "model": model_name(provider)}
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(output, ensure_ascii=False)})
         if len(trace) >= 8 or round_index == 3:
             break
     answer = summary_answer(tools.profile, request.question) if tools.profile else "本轮工具调用已到上限，可以缩小范围后继续查询。"
     return {"answer": answer, "parts": [], "cards": tools.cards, "trace": trace,
-            "model": provider_config(provider)["model"]}
+            "model": model_name(provider)}

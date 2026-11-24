@@ -7,11 +7,18 @@ from .snapshots import RULE_VERSION, digest, run_data_cleaning, table_data
 from .store import db, get, put
 
 
+class JobStopped(Exception):
+    pass
+
+
 def checkpoint(job, stage, result=None):
-    job["stage"] = stage
-    if result is not None:
-        job.setdefault("stages", {})[stage] = {**result, "recorded_at": time.time(), "run_id": job["id"]}
     with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if result is None and get(conn, "job_stop", job["id"]):
+            raise JobStopped
+        job["stage"] = stage
+        if result is not None:
+            job.setdefault("stages", {})[stage] = {**result, "recorded_at": time.time(), "run_id": job["id"]}
         put(conn, "job", job["id"], job)
 
 

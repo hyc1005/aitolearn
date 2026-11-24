@@ -1,68 +1,116 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { Alert, Button, Input, Space } from 'antd'
+import { useState, type FormEvent } from 'react'
+import { Alert, Button, Input, Select, Space } from 'antd'
 
-export type ModelAccess = {
-  active: string
-  providers: { id: string; name: string; model: string; base_url: string; env: string; configured: boolean }[]
-}
+export type ModelChoice = { connection_id: string; model_id: string; effort: string; connection_name?: string }
+export type ModelEntry = { id: string; enabled: boolean; mode: string; efforts: string[]; verified: string[]; legacy?: boolean }
+export type Connection = { id: string; name: string; adapter: string; base_url: string; configured: boolean; env: string; models: ModelEntry[]; catalog: string[] }
+export type ModelAccess = { default?: Omit<ModelChoice, 'effort'>; connections: Connection[]; saved_id?: string; background: string }
 export type Api = <T = any>(path: string, options?: RequestInit) => Promise<T>
+export const effortLabel: Record<string, string> = { default: '平台默认', off: '关闭', on: '开启', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '很高', max: '最高' }
+export const json = (method: string, body: unknown): RequestInit => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 
 export function ModelAccessPage({ access, api, update }: { access?: ModelAccess; api: Api; update: (value: ModelAccess) => void }) {
   const [selection, setSelection] = useState('')
+  const [catalogNotice, setCatalogNotice] = useState('')
+  if (!access) return <p>正在读取模型接入设置…</p>
+  const id = selection || access.default?.connection_id || 'opencode'
+  const connection = access.connections.find(c => c.id === id)
+  const background = access.connections.filter(c => c.adapter !== 'custom' && c.configured)
+  return <>
+    <label>后台默认平台 <Select aria-label="后台默认平台" value={access.background} style={{ minWidth: 150 }}
+      options={background.map(c => ({ value: c.id, label: c.name }))}
+      onChange={async value => {
+        try {
+          await api('/models/settings/' + value, json('PUT', {}))
+          update(await api('/models/connections'))
+        } catch (error) { window.alert((error as Error).message) }
+      }} /></label>
+    <section className="model-access">
+      <fieldset><legend>选择连接</legend>
+        {access.connections.map(c => <label key={c.id} className="provider-choice">
+          <input type="radio" name="connection" checked={id === c.id} onChange={() => setSelection(c.id)} />
+          <strong>{c.name}</strong><span>{c.configured ? '已配置' : '待配置'}</span>
+        </label>)}
+        <Button onClick={() => setSelection('new')}>添加自定义连接</Button>
+      </fieldset>
+      <div className="provider-form">
+        {catalogNotice && <Alert type="warning" title={catalogNotice} showIcon closable onClose={() => setCatalogNotice('')} />}
+        <ConnectionEditor key={id} connection={connection} access={access} api={api} update={update} select={setSelection} notice={setCatalogNotice} />
+      </div>
+    </section>
+  </>
+}
+
+function ConnectionEditor({ connection: c, access, api, update, select, notice }: { connection?: Connection; access: ModelAccess; api: Api; update: (value: ModelAccess) => void; select: (id: string) => void; notice: (value: string) => void }) {
+  const [name, setName] = useState(c?.name || '')
+  const [address, setAddress] = useState(c?.base_url || '')
   const [key, setKey] = useState('')
-  const [busy, setBusy] = useState('')
+  const [filter, setFilter] = useState('')
+  const [manual, setManual] = useState('')
+  const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<{ error: boolean; text: string }>()
-  const provider = access?.providers.find(item => item.id === (selection || access.active))
-  useEffect(() => { setKey(''); setFeedback(undefined) }, [selection])
-  if (!access || !provider) return <p>正在读取模型接入设置…</p>
-
-  async function save(event: FormEvent) {
+  const [probe, setProbe] = useState<Record<string, string>>({})
+  const [cap, setCap] = useState<Record<string, { mode: string; efforts: string[] }>>({})
+  const path = '/models/connections/' + (c?.id || 'new')
+  const ids = [...new Set([...(c?.models.map(m => m.id) || []), ...(c?.catalog || [])])].filter(id => id.toLowerCase().includes(filter.trim().toLowerCase()))
+  async function action(work: () => Promise<void>, ok: string) {
+    setBusy(true); setFeedback(undefined); notice('')
+    try { await work(); setFeedback({ error: false, text: ok }) }
+    catch (error) { setFeedback({ error: true, text: (error as Error).message }) }
+    finally { setBusy(false) }
+  }
+  function save(event: FormEvent) {
     event.preventDefault()
-    if (!provider || busy) return
-    setBusy('save')
-    setFeedback(undefined)
-    try {
-      update(await api('/models/settings/' + provider.id, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ api_key: key }),
-      }))
-      setKey('')
-      setFeedback({ error: false, text: '已启用 ' + provider.name })
-    } catch (error) { setFeedback({ error: true, text: (error as Error).message }) }
-    finally { setBusy('') }
+    void action(async () => {
+      const saved = await api<ModelAccess>(path, json('PUT', { name, base_url: address, api_key: key || undefined }))
+      update(saved); setKey('')
+      try { if (saved.connections.find(entry => entry.id === saved.saved_id)?.configured) update(await api(`/models/connections/${saved.saved_id}/catalog`, { method: 'POST' })) }
+      catch (error) { notice('连接已保存。' + (error as Error).message) }
+      finally { if (!c && saved.saved_id) select(saved.saved_id) }
+    }, '连接已保存')
   }
-
-  async function test() {
-    if (!provider || busy) return
-    setBusy('test')
-    setFeedback(undefined)
-    try {
-      await api('/models/test/' + provider.id, { method: 'POST' })
-      setFeedback({ error: false, text: '已收到模型平台的测试回复' })
-    } catch (error) { setFeedback({ error: true, text: (error as Error).message }) }
-    finally { setBusy('') }
+  const saveModel = async (id: string, enabled: boolean, mode = 'unknown', efforts: string[] = []) => {
+    update(await api(path + '/model', json('PUT', { model_id: id, enabled, mode, efforts })))
   }
-
-  return <section className="model-access">
-    <fieldset disabled={!!busy}>
-      <legend>选择平台</legend>
-      {access.providers.map(item => <label key={item.id} className="provider-choice">
-        <input type="radio" name="provider" checked={provider.id === item.id} onChange={() => setSelection(item.id)} />
-        <span><strong>{item.name}</strong><span>{item.model}</span></span>
-        <span>{item.id === access.active && item.configured ? '当前启用' : item.configured ? '已配置' : '待配置'}</span>
-      </label>)}
-    </fieldset>
-    <form onSubmit={save} className="provider-form">
-      <dl><dt>接口地址</dt><dd><code>{provider.base_url}</code></dd><dt>默认模型</dt><dd>{provider.model}</dd></dl>
-      <label htmlFor="provider-key">API 密钥</label>
-      <Input.Password id="provider-key" autoComplete="off" maxLength={2048} value={key}
-        placeholder={provider.configured ? '已配置，可填写替换密钥' : '粘贴平台 API 密钥'}
-        onChange={event => setKey(event.target.value)} disabled={!!busy} />
-      <p>密钥保存在本机凭据库。环境变量 <code>{provider.env}</code> 存在时优先使用。</p>
-      <Space wrap>
-        <Button type="primary" htmlType="submit" loading={busy === 'save'} disabled={!!busy || (!key.trim() && !provider.configured)}>保存并启用</Button>
-        <Button onClick={() => void test()} loading={busy === 'test'} disabled={!!busy || !provider.configured || !!key.trim()}>测试连接</Button>
-      </Space>
-      {feedback && <Alert type={feedback.error ? 'error' : 'success'} title={feedback.text} showIcon />}
+  return <div className="provider-form">
+    <form className="provider-form" onSubmit={save}>
+      <label>连接名称 <Input value={name} required maxLength={100} onChange={e => setName(e.target.value)} /></label>
+      <label>API 地址 <Input value={address} readOnly={!!c && c.adapter !== 'custom'} required maxLength={500} placeholder="https://example.com/v1" onChange={e => setAddress(e.target.value)} /></label>
+      <label>API 密钥 <Input.Password autoComplete="off" maxLength={2048} value={key} placeholder={c?.configured ? '已保存，可填写替换密钥' : '输入 API 密钥'} onChange={e => setKey(e.target.value)} /></label>
+      <p>密钥保存在本机凭据库。更改自定义地址须重新确认密钥。{c?.env ? ` 环境变量 ${c.env} 优先。` : ''}</p>
+      <Space wrap><Button type="primary" htmlType="submit" disabled={busy}>保存连接</Button>
+        {c && <Button disabled={busy || !c.configured} onClick={() => void action(async () => update(await api(path + '/catalog', { method: 'POST' })), '目录已刷新')}>刷新目录</Button>}</Space>
     </form>
-  </section>
+    {feedback && <Alert type={feedback.error ? 'warning' : 'success'} title={feedback.text} showIcon />}
+    {c && <fieldset disabled={busy} className="connection-models"><legend>模型目录和聊天清单</legend>
+      <Input aria-label="搜索模型目录" placeholder="搜索模型" value={filter} onChange={e => setFilter(e.target.value)} />
+      <Space wrap><Input aria-label="手动登记模型 ID" placeholder="手动填写模型 ID" value={manual} onChange={e => setManual(e.target.value)} />
+        <Button disabled={busy || !manual.trim() || c.models.some(m => m.id === manual.trim())} onClick={() => void action(async () => { await saveModel(manual.trim(), false); setFilter(''); setManual('') }, '模型已登记，请测试后勾选使用')}>登记</Button></Space>
+      {ids.map(id => {
+        const m = c.models.find(entry => entry.id === id)
+        const modes = cap[id] || { mode: m?.mode || 'unknown', efforts: m?.efforts.filter(e => e !== 'default') || [] }
+        const current = m?.efforts.includes(probe[id]) ? probe[id] : 'default'
+        const isDefault = access.default?.connection_id === c.id && access.default.model_id === id
+        return <div className="connection-model" key={id}>
+          <label><input type="checkbox" checked={!!m?.enabled} onChange={e => void action(() => saveModel(id, e.target.checked, m?.mode, m?.efforts.filter(v => v !== 'default' && v !== 'on' && v !== 'off')), '聊天清单已保存')} /> {id}</label>
+          <small>{m?.verified.includes('default') ? `可聊天 · ${m.verified.map(e => effortLabel[e]).join('、')}` : '尚未通过聊天测试'}</small>
+          {!m && <Button size="small" onClick={() => void action(() => saveModel(id, false), '已登记，请测试')}>登记并测试</Button>}
+          {m && <>
+            {c.adapter === 'custom' && <Space wrap>
+              <Select aria-label={`${id} 思考能力`} value={modes.mode} options={[{ value: 'unknown', label: '平台默认' }, { value: 'switch', label: '开启／关闭（thinking）' }, { value: 'effort', label: '多档位（reasoning_effort）' }]} onChange={mode => setCap({ ...cap, [id]: { mode, efforts: [] } })} />
+              {modes.mode === 'effort' && <Select aria-label={`${id} 登记档位`} mode="multiple" style={{ minWidth: 140 }} value={modes.efforts} options={['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(value => ({ value, label: effortLabel[value] }))} onChange={efforts => setCap({ ...cap, [id]: { ...modes, efforts } })} />}
+              <Button size="small" disabled={busy || !cap[id]} onClick={() => void action(async () => {
+                await saveModel(id, m.enabled, modes.mode, modes.efforts); setCap(old => { const next = { ...old }; delete next[id]; return next })
+              }, '思考能力已保存，请测试对应档位')}>保存能力</Button>
+            </Space>}
+            <Space wrap>
+              <Select aria-label={`${id} 测试强度`} value={current} options={m.efforts.map(value => ({ value, label: effortLabel[value] }))} onChange={effort => setProbe({ ...probe, [id]: effort })} />
+              <Button size="small" disabled={busy || !c.configured} onClick={() => void action(async () => update(await api(path + '/test', json('POST', { model_id: id, effort: current }))), `${id} / ${effortLabel[current]}：聊天测试通过`)}>测试</Button>
+              <Button size="small" disabled={busy || !m.enabled || !m.verified.includes('default') || isDefault} onClick={() => void action(async () => update(await api('/models/chat-default/' + c.id, json('PUT', { model_id: id }))), '新会话默认模型已保存')}>{isDefault ? '新会话默认' : '设为默认'}</Button>
+            </Space>
+          </>}
+        </div>
+      })}
+    </fieldset>}
+  </div>
 }
