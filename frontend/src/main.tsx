@@ -167,6 +167,8 @@ function Workbench() {
   const [runId, setRunId] = useState(() => /^#agent\/([a-f0-9]+)$/.exec(location.hash)?.[1] || '')
   const [runDetail, setRunDetail] = useState<Row>()
   const [cleanDetail, setCleanDetail] = useState<Row>()
+  const [importPreview, setImportPreview] = useState<Row>()
+  const [previewBusy, setPreviewBusy] = useState(false)
   const [runError, setRunError] = useState('')
   const [caseAvailable, setCaseAvailable] = useState(false)
   const [onboardingSignal, setOnboardingSignal] = useState(0)
@@ -363,8 +365,24 @@ function Workbench() {
     const result = await api('/imports', { ...post, body: payload })
     if (result.skipped?.length) message.info('已跳过字段说明：' + result.skipped.join('、'))
     setFiles([])
+    setImportPreview(undefined)
     await refresh()
   })
+  useEffect(() => {
+    let active = true
+    setImportPreview(undefined)
+    if (!files.length) return
+    const payload = new FormData()
+    files.forEach(file => payload.append('files', file))
+    payload.append('mapping', mapping)
+    setPreviewBusy(true)
+    void api('/imports/preview', { ...post, body: payload }).then(result => {
+      if (active) setImportPreview(result)
+    }).catch(error => {
+      if (active) setImportPreview({ files: [], can_import: false, error: error.message })
+    }).finally(() => { if (active) setPreviewBusy(false) })
+    return () => { active = false }
+  }, [files, mapping])
   const openDoc = (id: string) => perform(async () => { setDoc(await api('/materials/' + id)); setChanges({}) })
   const launch = (target: Row, onLaunched?: () => void) => perform(async () => {
     const result = await api('/agent/runs', json('POST', { node, snapshot_id: data.snapshot_id, ...target }))
@@ -502,11 +520,21 @@ function Workbench() {
           <input ref={importInput} type="file" hidden multiple accept=".csv,.xlsx" onChange={e => setFiles(Array.from(e.target.files || []))} />
           <Space wrap><Button onClick={() => importInput.current?.click()}>选择文件</Button>
             <Text>{files.length ? '已选 ' + files.length + ' 个文件' : '尚未选择文件'}</Text>
-            <Button type="primary" loading={busy} disabled={!files.length} onClick={importFiles}>开始清洗</Button>
+            <Button type="primary" loading={busy} disabled={!files.length || previewBusy || !importPreview?.can_import} onClick={importFiles}>开始清洗</Button>
           </Space>
           {!!files.length && <ul>{files.map((file, index) => <li key={file.name + index}>
             {file.name} <Button type="link" onClick={() => setFiles(current => current.filter((_, i) => i !== index))}>移除</Button>
           </li>)}</ul>}
+          {previewBusy && <Text>正在识别文件…</Text>}
+          {importPreview?.error && <Alert type="error" title={importPreview.error} />}
+          {importPreview?.files?.map((file: Row, index: number) => <div key={file.name + index}>
+            <Text type={file.status === 'error' ? 'danger' : 'secondary'}>
+              {file.name} · {file.message || Object.entries(file.tables).map(([name, count]) => name + ' ' + count + ' 行').join('、')}
+            </Text>
+          </div>)}
+          {files.length > 0 && importPreview && !importPreview.can_import && !importPreview.error &&
+            !importPreview.files.some((file: Row) => file.status === 'error') &&
+            <Alert type="warning" title="没有可导入的业务数据，请选择学情文件。" />}
           <details className="spaced"><summary>自定义列映射</summary><Input.TextArea value={mapping} onChange={e => setMapping(e.target.value)} placeholder='{"学号":"学生编号"}' /></details>
           <Paragraph type="secondary" className="spaced">可上传 XLSX 工作簿或成组 CSV，也支持名册和总分。缺少文件时，清洗报告会列出无法关联的原始行。</Paragraph>
         </Card>

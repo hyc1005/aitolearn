@@ -73,6 +73,18 @@ class WorkflowTests(TestCase):
                       for name in ("模拟学生", "课程要求", "测验节点", "题目与材料", "作答记录")}
         self.assertEqual(counts, {"模拟学生": 40, "课程要求": 9, "测验节点": 2, "题目与材料": 65, "作答记录": 806})
 
+    def test_import_preview_identifies_files_and_missing_columns(self):
+        folder = next(Path("ori_data").rglob("字段说明.csv")).parent
+        files = [("files", (path.name, path.read_bytes(), "text/csv")) for path in folder.glob("*.csv")]
+        result = self.client.post("/api/imports/preview", files=files).json()
+        self.assertTrue(result["can_import"])
+        self.assertEqual(next(item for item in result["files"] if item["name"] == "字段说明.csv")["status"], "skipped")
+        missing = self.client.post("/api/imports/preview", files={
+            "files": ("模拟学生.csv", "学生编号\nD01\n".encode(), "text/csv")}).json()
+        self.assertFalse(missing["can_import"])
+        self.assertIn("模拟班级编号", missing["files"][0]["message"])
+        self.assertFalse((store.ROOT / "files").exists())
+
     def run_cleaning(self, key, check_model=True):
         with store.db() as conn:
             item = store.get(conn, "job", key)

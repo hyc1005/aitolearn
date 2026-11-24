@@ -22,7 +22,7 @@ from .chat_agent import run_chat
 from .conversation import (CORRECTION_FIELDS, cleaning_card, deterministic, latest_clean, make_proposal, material_version, onboarding,
                            proposal_card, resolve, resolve_recommendation, save_session, session_view,
                            settings_get, settings_put)
-from .data import profile, read_file, student_scores
+from .data import REQUIRED, profile, read_file, student_scores
 from .learning_chat import ChatRequest, ChatTurn, collect_sources, reply
 from .models import KEY_SERVICE, PROVIDERS, ToolsUnavailable, active_provider, complete, provider_config, provider_key
 from .recommendation_review import preview_text
@@ -477,29 +477,67 @@ def retry_run(conn, item):
     return item
 
 
+async def inspect_import(files, mapping):
+    try:
+        columns = json.loads(mapping)
+        if not isinstance(columns, dict) or not all(isinstance(v, str) for v in columns.values()):
+            raise ValueError("列映射必须是 JSON 对象")
+    except (ValueError, TypeError) as error:
+        raise HTTPException(400, str(error)) from error
+    inspected = []
+    for file in files:
+        name = Path(file.filename or "").name
+        raw = await read_upload(file)
+        info = {"name": name, "tables": {}, "status": "ready", "message": ""}
+        try:
+            if name.lower().endswith(".csv"):
+                try:
+                    contents = raw.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    contents = raw.decode("gb18030")
+                headers = next(csv.reader(io.StringIO(contents, newline="")), [])
+                headers = [columns.get(header.strip(), header.strip()) for header in headers]
+                if {"数据表", "字段名", "含义"} <= set(headers):
+                    info.update(status="skipped", message="字段说明表，将跳过")
+                    inspected.append((info, raw, []))
+                    continue
+                expected = Path(name).stem
+                if expected in REQUIRED:
+                    missing = sorted(set(REQUIRED[expected]) - set(headers))
+                    if missing:
+                        raise ValueError("缺少必需列：" + "、".join(missing))
+            rows = read_file(name, raw, columns)
+            for row in rows:
+                info["tables"][row["table"]] = info["tables"].get(row["table"], 0) + 1
+        except (ValueError, OSError, UnicodeError, csv.Error) as error:
+            info.update(status="error", message=str(error))
+            rows = []
+        inspected.append((info, raw, rows))
+    return inspected
+
+
+@app.post("/api/imports/preview")
+async def preview_import(files: list[UploadFile] = File(...), mapping: str = Form("{}")):
+    inspected = await inspect_import(files, mapping)
+    return {"files": [info for info, _, _ in inspected],
+            "can_import": any(rows for _, _, rows in inspected) and not any(
+                info["status"] == "error" for info, _, _ in inspected)}
+
+
 @app.post("/api/imports")
 async def stage(files: list[UploadFile] = File(...), mapping: str = Form("{}"),
                 chat_session_id: str | None = Form(None)):
     rows, sources, pending, skipped = [], [], [], []
     try:
+        inspected = await inspect_import(files, mapping)
         columns = json.loads(mapping)
-        if not isinstance(columns, dict) or not all(isinstance(v, str) for v in columns.values()):
-            raise ValueError("列映射必须是 JSON 对象")
-        for file in files:
-            name = Path(file.filename or "").name
-            raw = await read_upload(file)
-            if name.lower().endswith(".csv"):
-                try:
-                    headers = next(csv.reader(io.StringIO(raw.decode("utf-8-sig"))), [])
-                except UnicodeDecodeError:
-                    headers = next(csv.reader(io.StringIO(raw.decode("gb18030"))), [])
-                if {"数据表", "字段名", "含义"} <= {header.strip() for header in headers}:
-                    skipped.append(name)
-                    continue
-            try:
-                parsed = read_file(name, raw, columns)
-            except (ValueError, UnicodeError, csv.Error) as error:
-                raise ValueError(f"{name}：{error}") from error
+        for info, raw, parsed in inspected:
+            name = info["name"]
+            if info["status"] == "skipped":
+                skipped.append(name)
+                continue
+            if info["status"] == "error":
+                raise ValueError(f"{name}：{info['message']}")
             file_id = new_id()
             rows.extend({**row, "file_id": file_id} for row in parsed)
             pending.append((file_id, name, raw))
