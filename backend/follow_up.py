@@ -98,36 +98,40 @@ def read_assignment(key: str, revision: int):
 
 @router.put("/recommendations/{key}/follow-up")
 def assign(key: str, selection: Assignment):
-    record_id = f"{key}:{selection.revision}"
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        prior = get(conn, KIND, record_id)
-        if prior:
-            if (prior["baseline_node"] != selection.baseline_node
-                    or {item["id"] for item in prior["directions"]} != set(selection.directions)):
-                raise HTTPException(409, "本版建议已登记布置")
-            return results(conn, prior)
-        draft = get(conn, "draft", key)
-        if not draft or draft["revision"] != selection.revision or not draft["approved"]:
-            raise HTTPException(409, "请先确认当前版本的学习建议")
-        if not draft.get("student") or not draft.get("snapshot_id"):
-            raise HTTPException(422, "只有已登记快照的学生建议可跟踪")
-        base = metadata(conn, draft["snapshot_id"])
-        available = options(conn, draft, base)
-        directions = [item for item in available["directions"] if item["id"] in selection.directions]
-        if (len(directions) != len(selection.directions)
-                or selection.baseline_node not in {node["id"] for node in available["nodes"]}):
-            raise HTTPException(422, "请选择该建议的练习方向和有效基线测验")
-        sid = (get(conn, "settings", "active_snapshot") or {}).get("id", "")
-        tables = metadata(conn, sid)
-        item = {"draft_id": key, "revision": selection.revision, "student": draft["student"],
-                "snapshot_id": draft["snapshot_id"], "baseline_node": selection.baseline_node,
-                "assignment_snapshot_id": sid, "assigned_at": time.time(),
-                "directions": directions, "known_nodes": sorted(tables["测验节点"]),
-                "active_nodes": sorted(observed_nodes(conn, sid)),
-                "observed_nodes": sorted(observed_nodes(conn, sid, draft["student"]))}
-        put(conn, KIND, record_id, item)
-        return results(conn, item)
+        return assign_in(conn, key, selection)
+
+
+def assign_in(conn, key, selection):
+    record_id = f"{key}:{selection.revision}"
+    prior = get(conn, KIND, record_id)
+    if prior:
+        if (prior["baseline_node"] != selection.baseline_node
+                or {item["id"] for item in prior["directions"]} != set(selection.directions)):
+            raise HTTPException(409, "本版建议已登记布置")
+        return results(conn, prior)
+    draft = get(conn, "draft", key)
+    if not draft or draft["revision"] != selection.revision or not draft["approved"]:
+        raise HTTPException(409, "请先确认当前版本的学习建议")
+    if not draft.get("student") or not draft.get("snapshot_id"):
+        raise HTTPException(422, "只有已登记快照的学生建议可跟踪")
+    base = metadata(conn, draft["snapshot_id"])
+    available = options(conn, draft, base)
+    directions = [item for item in available["directions"] if item["id"] in selection.directions]
+    if (len(directions) != len(selection.directions)
+            or selection.baseline_node not in {node["id"] for node in available["nodes"]}):
+        raise HTTPException(422, "请选择该建议的练习方向和有效基线测验")
+    sid = (get(conn, "settings", "active_snapshot") or {}).get("id", "")
+    tables = metadata(conn, sid)
+    item = {"draft_id": key, "revision": selection.revision, "student": draft["student"],
+            "snapshot_id": draft["snapshot_id"], "baseline_node": selection.baseline_node,
+            "assignment_snapshot_id": sid, "assigned_at": time.time(),
+            "directions": directions, "known_nodes": sorted(tables["测验节点"]),
+            "active_nodes": sorted(observed_nodes(conn, sid)),
+            "observed_nodes": sorted(observed_nodes(conn, sid, draft["student"]))}
+    put(conn, KIND, record_id, item)
+    return results(conn, item)
 
 
 @router.get("/students/{student}/follow-ups")

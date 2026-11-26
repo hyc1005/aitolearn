@@ -28,7 +28,8 @@ type Result = {
   snapshot_id?: string; session_id?: string; context?: Context
 }
 type Context = { student: string; group: string; node: string; anchor_event?: string; snapshot_id?: string }
-type Turn = { question: string; result?: Result; error?: string; context?: Context; started?: number; elapsed?: number; attachments?: Reference[] }
+type Turn = { question: string; result?: Result; error?: string; context?: Context; started?: number; elapsed?: number; attachments?: Reference[];
+  reasoning?: string; liveTrace?: { tool: string; status: string }[]; reasoningUnavailable?: boolean }
 type Onboarding = {
   state: string; detail: Record<string, any>; dismissed: boolean; completed: boolean
   snapshot_id?: string; model_configured: boolean
@@ -55,6 +56,49 @@ type Props = {
 }
 
 const SESSION_KEY = 'aitolearn.chat.session'
+const TOOL_LABELS: Record<string, string> = {
+  resolve_scope:'解析查询对象', read_profile:'读取指标和覆盖人数', read_evidence:'读取原始作答',
+  search_materials:'检索资料', read_exercises:'查找练习', read_follow_ups:'读取练后回看',
+  read_distribution:'读取班级分布', read_attachments:'读取附件', read_cleaning:'查看清洗进度',
+  read_cleaning_issues:'读取清洗异常', read_jobs:'查询任务', read_job_detail:'读取任务详情',
+  propose_retry:'准备重试', propose_stop_job:'准备停止任务', read_material_reviews:'查询待校对资料',
+  read_material_list:'查询资料列表', read_material_review:'读取待校对段落', read_material_page:'读取资料页',
+  propose_publish_material:'准备发布资料', propose_material_revision:'准备资料修订', read_drafts:'读取建议版本',
+  read_draft_detail:'读取终审与依据', propose_draft_revision:'准备建议修订', propose_exercise_revision:'准备练习修订',
+  propose_approve_draft:'准备确认建议', read_follow_up_options:'读取练后跟踪选项', propose_follow_up:'准备登记练后跟踪',
+  ask_clarification:'等待补充信息', prepare_formal_export:'准备导出成果', propose_attempt_correction:'准备作答修订',
+  propose_recommendation:'准备建议任务', open_page:'定位业务页面', read_progress:'汇总历次成绩',
+  queue_student_import:'启动学情清洗', queue_material_extract:'启动资料解析',
+}
+
+async function streamChat(body: unknown, onEvent: (event: any) => void): Promise<Result> {
+  const response = await fetch('/api/learning-chat/stream', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(typeof error.detail === 'string' ? error.detail : '无法启动对话，请检查服务状态')
+  }
+  if (!response.body) throw new Error('无法读取对话响应')
+  const reader = response.body.getReader(), decoder = new TextDecoder()
+  let buffer = '', result: Result | undefined
+  while (true) {
+    const chunk = await reader.read()
+    buffer += decoder.decode(chunk.value, { stream: !chunk.done })
+    const frames = buffer.split(/\r?\n\r?\n/)
+    buffer = frames.pop() || ''
+    for (const frame of frames) {
+      const data = frame.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n')
+      if (!data) continue
+      const event = JSON.parse(data)
+      if (event.type === 'error') throw new Error(event.message || '对话失败，请重试')
+      if (event.type === 'complete') result = event.result
+      else onEvent(event)
+    }
+    if (chunk.done) break
+  }
+  if (!result) throw new Error('连接中断，未收到完整回答；请检查历史后重试。')
+  return result
+}
 
 function read(key: string, storage: Storage) {
   try { return storage.getItem(key) || '' } catch { return '' }
@@ -79,6 +123,7 @@ export function LearningChat(props: Props) {
   const [attachments, setAttachments] = useState<Reference[]>([])
   const [pickerKind, setPickerKind] = useState<'student' | 'group'>('student')
   const bottom = useRef<HTMLDivElement>(null)
+  const thread = useRef<HTMLDivElement>(null)
   const pendingProposals = useRef(new Set<string>())
   const composerDock = useRef<HTMLDivElement>(null)
   const composerInput = useRef<TextAreaRef>(null)
@@ -177,17 +222,15 @@ export function LearningChat(props: Props) {
       followLatest.current = near
       setAwayFromLatest(!near)
     }
-    window.addEventListener('scroll', track, { passive: true, capture: true })
-    return () => window.removeEventListener('scroll', track, true)
+    const area = thread.current
+    area?.addEventListener('scroll', track, { passive: true })
+    return () => area?.removeEventListener('scroll', track)
   }, [props.active, turns.length > 0])
 
   function jumpToLatest() {
     followLatest.current = true
     setAwayFromLatest(false)
-    if (bottom.current) {
-      bottom.current.style.scrollMarginBottom = `${composerDock.current?.offsetHeight ?? 0}px`
-      bottom.current.scrollIntoView({ block: 'end' })
-    }
+    if (thread.current) thread.current.scrollTop = thread.current.scrollHeight
   }
 
   useEffect(() => {
@@ -266,9 +309,7 @@ export function LearningChat(props: Props) {
     setAttachments([])
     setTurns([...history, shown])
     try {
-      const result = await api<Result>('/learning-chat', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const result = await streamChat({
           question,
           attachments: refs,
           session_id: sessionId,
@@ -284,16 +325,24 @@ export function LearningChat(props: Props) {
           history: history.filter(turn => turn.result).slice(-5).map(turn => ({
             question: turn.question, answer: turn.result!.answer.slice(0, 1200),
           })),
-        }),
+        }, event => {
+          setTurns(current => current.map((turn, index) => index !== history.length ? turn : {
+            ...turn,
+            reasoning: event.type === 'reasoning' ? ((turn.reasoning || '') + event.text).slice(0, 120000) : turn.reasoning,
+            reasoningUnavailable: event.type === 'reasoning_unavailable' || turn.reasoningUnavailable,
+            liveTrace: event.type === 'tool_start' ? [...(turn.liveTrace || []), { tool: event.tool, status: 'running' }]
+              : event.type === 'tool_end' ? [...(turn.liveTrace || []).slice(0, -1), { tool: event.tool, status: event.status }]
+              : turn.liveTrace,
+          }))
       })
       if (result.session_id) { setSessionId(result.session_id); write(SESSION_KEY, result.session_id, localStorage) }
       if (result.selection) setChoice(result.selection)
       if (result.context) setContext({ ...result.context, anchor_event: '' })
-      setTurns([...history, { question, context: outgoing, result }])
+      setTurns(current => [...history, { ...current[history.length], question, context: outgoing, result }])
       if (!props.snapshot && result.cards?.some(card => card.kind === 'import'))
         write('aitolearn.import.question', question, sessionStorage)
     } catch (error) {
-      setTurns([...history, { ...shown, elapsed: Date.now() - shown.started!, error: (error as Error).message }])
+      setTurns(current => [...history, { ...current[history.length], ...shown, elapsed: Date.now() - shown.started!, error: (error as Error).message }])
     } finally { setBusy(false) }
   }
 
@@ -403,6 +452,7 @@ export function LearningChat(props: Props) {
   }
 
   function chooseCandidate(option: Record<string, any>, card: CardData) {
+    if (card.kind === 'clarification') { void send(String(option.label)); return }
     const override: Partial<Context> = option.kind === 'student'
       ? { student: option.id, group: '', node: context.node }
       : option.kind === 'group' ? { student: '', group: option.id, node: context.node }
@@ -448,6 +498,7 @@ export function LearningChat(props: Props) {
       </Space>
     </header>
     {restoring && <div className="chat-restore"><ActiveStatus label="正在恢复对话" /></div>}
+    <div ref={thread} className="chat-thread" aria-label="学情对话记录" tabIndex={0}>
     {!restoring && !turns.length && (!props.snapshot || !!props.pendingRun) && <section className="chat-start" aria-label="学情数据状态">
       <div className="chat-status-icon" aria-hidden="true"><FileSearchOutlined /></div>
       <div className="chat-start-copy">
@@ -459,7 +510,6 @@ export function LearningChat(props: Props) {
       {props.pendingRun ? <Button type="primary" onClick={() => props.openRun(props.pendingRun!)}>查看清洗与复核</Button>
         : <Button type="primary" onClick={props.openImport}>导入学情数据</Button>}
     </section>}
-    <div className="chat-thread" aria-label="学情对话记录">
       {turns.map((turn, index) => {
         const scope = turn.result?.context ?? turn.context
         return <article key={index} className="chat-turn">
@@ -497,26 +547,19 @@ export function LearningChat(props: Props) {
             readEvidence={readEvidence} confirmProposal={confirmProposal} chooseCandidate={chooseCandidate}
             openProfile={props.openProfile} openRun={props.openRun} openImport={props.openImport}
             openDraft={props.openDraft} openMaterial={props.openMaterial} openPage={props.openPage} />)}
-          {!!(turn.result.trace?.length || turn.result.cards?.some(card => card.kind === 'profile')) &&
-            <details className="chat-tool-details"><summary>执行过程与依据
+          {!!(turn.reasoning || turn.result.trace?.length || turn.result.cards?.some(card => card.kind === 'profile') || turn.result.mode === 'tools' || turn.result.model_call) &&
+            <details className="chat-tool-details"><summary>思考与执行过程
               {!!turn.result.trace?.length && ' · ' + turn.result.trace.length + ' 步'}
             </summary>
+            {turn.reasoning ? <p className="preserve chat-reasoning">{turn.reasoning}</p>
+              : <p className="chat-reasoning-empty">此模型本轮未提供可展示的思考内容。</p>}
             {(turn.result.cards || []).filter(card => card.kind === 'profile').map((card, cardIndex) =>
               <ResultCard key={card.id || cardIndex} card={card} api={api} snapshot={turn.result?.snapshot_id || props.snapshot}
                 readEvidence={readEvidence} confirmProposal={confirmProposal} chooseCandidate={chooseCandidate}
                 openProfile={props.openProfile} openRun={props.openRun} openImport={props.openImport}
                 openDraft={props.openDraft} openMaterial={props.openMaterial} openPage={props.openPage} />)}
             {!!turn.result.trace?.length && <ol>{turn.result.trace.map((step, index) => <li key={index}>
-              {({ resolve_scope: '解析查询对象', read_profile: '读取指标和覆盖人数', read_evidence: '读取原始作答',
-                search_materials: '检索资料', open_import: '定位数据导入', read_cleaning: '查看清洗进度',
-                read_follow_ups: '读取练后回看', read_distribution: '读取班级分布', read_attachments: '读取本轮附件', queue_student_import: '启动学情清洗', queue_material_extract: '启动资料解析', read_progress: '汇总历次成绩',
-                propose_recommendation: '准备建议任务', open_page: '定位业务页面', read_exercises: '查找练习',
-                read_jobs: '查询任务', propose_retry: '准备重试', propose_stop_job: '准备停止任务', read_material_reviews: '查询待校对资料',
-                read_material_review: '读取待校对段落', propose_publish_material: '准备发布',
-                propose_material_revision: '准备资料修订', read_drafts: '读取建议版本',
-                propose_draft_revision: '准备建议修订', propose_approve_draft: '准备确认建议',
-                prepare_formal_export: '准备导出成果', propose_attempt_correction: '准备作答修订',
-              } as Record<string, string>)[step.tool] || '校验工具'}
+              {TOOL_LABELS[step.tool] || '校验工具'}
               {[step.student || step.group, step.node, step.indicator].filter(Boolean).map(value => ' · ' + value)}
               {step.count != null && ' · ' + step.count + (step.origin ? ' 份' : ' 条')}
               {step.origin === 'validated_fallback' && ' · 规则分流'}{step.origin === 'agent' && ' · Agent 工具调用'}
@@ -530,10 +573,22 @@ export function LearningChat(props: Props) {
               : turn.result.model && <span>{turn.result.model}</span>}
             {turn.result.elapsed_ms != null && <span>耗时 {(turn.result.elapsed_ms / 1000).toFixed(1)} 秒</span>}
           </footer>}
-        </div> : <ActiveStatus label="正在回答" started={turn.started} />}
+        </div> : <><ActiveStatus label="正在回答" started={turn.started} />
+          {!!(turn.reasoning || turn.liveTrace?.length || turn.reasoningUnavailable) && <details className="chat-tool-details" open>
+            <summary>思考与执行过程{turn.liveTrace?.length ? ` · ${turn.liveTrace.length} 步` : ''}</summary>
+            {turn.reasoning && <p className="preserve chat-reasoning">{turn.reasoning}</p>}
+            {turn.reasoningUnavailable && <p className="chat-reasoning-empty">此模型未提供实时思考，已改用普通请求。</p>}
+            {!!turn.liveTrace?.length && <ol>{turn.liveTrace.map((item, i) => <li key={i}>{TOOL_LABELS[item.tool] || '校验工具'} · {item.status === 'running' ? '执行中' : item.status === 'ok' ? '已完成' : item.status === 'waiting' ? '等待确认' : '已返回'}</li>)}</ol>}
+          </details>}
+        </>}
         </div>
       </article>})}
       <div ref={bottom} />
+    {!turns.length && !restoring && !!props.snapshot && <div className="chat-quick" aria-label="常用任务">
+      <Button icon={<UserOutlined aria-hidden="true" />} onClick={() => startQuick('student')}>查看学生表现</Button>
+      <Button icon={<BarChartOutlined aria-hidden="true" />} onClick={() => startQuick('group')}>查看班级薄弱指标</Button>
+      <Button icon={<ProfileOutlined aria-hidden="true" />} onClick={() => props.openAdvice({student: context.student, group: context.group, node: context.node})}>生成学习建议</Button>
+    </div>}
     </div>
     <div ref={composerDock} className="chat-composer-dock">
       {!!turns.length && awayFromLatest && <div className="chat-jump"><Button onClick={jumpToLatest}>回到最新消息</Button></div>}
@@ -580,11 +635,6 @@ export function LearningChat(props: Props) {
         </div>
       </div>
     </form></div>
-    {!turns.length && !restoring && !!props.snapshot && <div className="chat-quick" aria-label="常用任务">
-      <Button icon={<UserOutlined aria-hidden="true" />} onClick={() => startQuick('student')}>查看学生表现</Button>
-      <Button icon={<BarChartOutlined aria-hidden="true" />} onClick={() => startQuick('group')}>查看班级薄弱指标</Button>
-      <Button icon={<ProfileOutlined aria-hidden="true" />} onClick={() => props.openAdvice({student: context.student, group: context.group, node: context.node})}>生成学习建议</Button>
-    </div>}
     {attachmentOpen && <ChatAttachments api={api} context={context} close={()=>setAttachmentOpen(false)}
       autoSubmit={submitAttachments} useReferences={setAttachments} openRun={props.openRun} openImport={props.openImport} openMaterials={()=>props.openPage('materials')} />}
     <Drawer open={!!source} title="学生原始作答" size="min(850px, 100vw)" onClose={() => { setSource(undefined); setSourceRows([]) }}
@@ -618,6 +668,12 @@ function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, choose
     <Space wrap><Button onClick={() => openRun(card.run_id)}>查看任务</Button>
       {card.state === 'done' && <Button type="primary" onClick={() => openMaterial(card.material_id)}>校对资料</Button>}</Space>
   </Card>
+  if (card.kind === 'material_blocks') return <Card size="small" className="chat-card" title={'待校对 · ' + card.name}>
+    <p>从第 {card.offset + 1} 条开始，共 {card.count} 条。</p>
+    {card.blocks.map((block: {id:string; text:string; locator:string}) => <div key={block.id}>
+      <strong>{block.locator}</strong><p className="preserve">{block.text}</p></div>)}
+    <Button onClick={() => openMaterial(card.material_id)}>对照原图校对</Button>
+  </Card>
   if (card.kind === 'navigation') return <Card size="small" className="chat-card" title={card.title}>
     <Button onClick={() => openPage(card.page)}>打开{card.title}</Button>
   </Card>
@@ -639,6 +695,11 @@ function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, choose
   if (card.kind === 'candidates') return <Card size="small" className="chat-card" title="请选择对象">
     <p>{card.prompt}</p><Space wrap>{(card.options || []).map((option: Record<string, any>) =>
       <Button key={option.kind + option.id} onClick={() => chooseCandidate(option, card)}>{option.label}</Button>)}</Space>
+  </Card>
+  if (card.kind === 'clarification') return <Card size="small" className="chat-card" title="需要补充信息">
+    <p>{card.prompt}</p><Space wrap>{(card.options || []).map((option: string) =>
+      <Button key={option} onClick={() => chooseCandidate({label: option}, card)}>{option}</Button>)}</Space>
+    <p>也可以在输入框直接回复。</p>
   </Card>
   if (card.kind === 'progress') return <Card size="small" className="chat-card" title="按测验查看原始作答">
     <Space wrap>{card.nodes.map((node: string) => <Button key={node}
@@ -689,11 +750,13 @@ function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, choose
         : card.action === 'retry_job' ? (confirmed ? '任务已重新排队。' : '确认后重试这次失败的任务。')
         : card.action === 'stop_job' ? (confirmed ? '停止请求已提交。正在运行的任务会在可停止的阶段结束。' : '确认后停止这个任务。')
         : card.action === 'approve_draft' ? (confirmed ? '学习建议已确认。' : `确认第 ${card.payload?.revision} 版通过终审的学习建议。`)
+        : card.action === 'assign_follow_up' ? (confirmed ? '练后跟踪已登记。' : '请核对学生、基线测验和练习方向，确认后登记。')
         : confirmed ? (card.action === 'confirm_import' ? '这批数据已确认，后续诊断和建议读取同一快照。'
         : '建议任务已开始，进度与终审结果会保留在任务详情。')
         : (card.action === 'confirm_import' ? '复核已完成。确认后建立数据快照，后续诊断和建议都读取该快照。'
         : '将使用当前快照生成学情解读、建议草稿并执行独立终审。')}</p>
       {(card.payload?.student || card.payload?.group) && <p><Tag>{card.payload.student || card.payload.group}</Tag><Tag>{card.payload.node || '全部测验'}</Tag></p>}
+      {card.action === 'assign_follow_up' && <p>基线 {card.payload?.baseline_node} · 方向 {(card.payload?.directions || []).join('、')}</p>}
       {card.payload?.before !== undefined && <dl>
         <dt>修改前 {card.payload.field || ''}</dt><dd className="preserve">{card.payload.before || '空白'}</dd>
         <dt>修改后</dt><dd className="preserve">{card.payload.after}</dd>

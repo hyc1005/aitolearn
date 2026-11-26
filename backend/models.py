@@ -68,6 +68,83 @@ def complete_with_tools(provider, messages, session, **options):
     return _complete(provider, messages, session, True, **options)
 
 
+def stream_with_tools(provider, messages, session, **options):
+    """Collect a streamed tool response while exposing only provider reasoning chunks."""
+    import json
+    from .chat_stream import emit
+    selected = None if isinstance(provider, str) else provider
+    provider = selected.connection_id if selected else provider
+    key = selected.key if selected else provider_key(provider)
+    if not key:
+        raise ModelRequestError('credentials')
+    config = {'model': selected.model_id, 'base_url': selected.base_url} if selected else provider_config(provider)
+    body = {'model': config['model'], 'messages': messages, **options, 'stream': True}
+    direct = None
+    if selected:
+        body.update(selected.parameters())
+        if selected.adapter == 'custom':
+            from .model_connections import BoundTransport
+            direct = BoundTransport()
+    elif provider == 'deepseek':
+        body['thinking'] = {'type': 'disabled'}
+    content, reasoning, calls = [], [], {}
+    try:
+        with httpx.Client(transport=ModelTransport(provider, config['model'], session, transport=direct,
+                                                   base_url=config['base_url']),
+                          follow_redirects=False, timeout=httpx.Timeout(45, connect=8)) as client:
+            with client.stream('POST', config['base_url'].rstrip('/') + '/chat/completions',
+                               headers={**model_headers(selected.adapter if selected else provider, session),
+                                        'Authorization': f'Bearer {key}', 'Accept': 'text/event-stream'}, json=body) as response:
+                response.raise_for_status()
+                if 'text/event-stream' not in response.headers.get('content-type', '').lower():
+                    raise ToolsUnavailable('当前模型未返回流式响应')
+                for line in response.iter_lines():
+                    if not line.startswith('data:'):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == '[DONE]':
+                        continue
+                    event = json.loads(data)
+                    for choice in event.get('choices', []):
+                        if choice.get('index', 0) != 0:
+                            continue
+                        delta = choice.get('delta') or {}
+                        if isinstance(delta.get('reasoning_content'), str):
+                            chunk = delta['reasoning_content']
+                            reasoning.append(chunk)
+                            emit('reasoning', text=chunk)
+                        if isinstance(delta.get('content'), str):
+                            content.append(delta['content'])
+                        for call in delta.get('tool_calls') or []:
+                            index = call.get('index', 0)
+                            item = calls.setdefault(index, {'id': '', 'type': 'function',
+                                                            'function': {'name': '', 'arguments': ''}})
+                            if call.get('id'):
+                                item['id'] += call['id']
+                            for field in ('name', 'arguments'):
+                                item['function'][field] += (call.get('function') or {}).get(field) or ''
+        result = {'role': 'assistant', 'content': ''.join(content) or None}
+        if reasoning:
+            result['reasoning_content'] = ''.join(reasoning)
+        if calls:
+            result['tool_calls'] = [calls[index] for index in sorted(calls)]
+        if not result['content'] and not calls:
+            raise ModelRequestError('response')
+        return result
+    except ToolsUnavailable:
+        raise
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code in {400, 422}:
+            raise ToolsUnavailable('当前模型不支持流式工具调用') from None
+        raise ModelRequestError(response_code(error.response)) from None
+    except httpx.TimeoutException:
+        raise ModelRequestError('timeout') from None
+    except httpx.RequestError:
+        raise ModelRequestError('connection') from None
+    except (ValueError, TypeError, KeyError):
+        raise ModelRequestError('response') from None
+
+
 def model_name(provider):
     return provider_config(provider)["model"] if isinstance(provider, str) else provider.model_id
 

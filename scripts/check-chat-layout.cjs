@@ -14,12 +14,12 @@ async function check(browser, width) {
     default: fixed, background: 'opencode', connections: [{ id: 'local', adapter: 'custom',
       name: 'Test', configured: true, catalog: [], models: [model(long), model('other')] }],
   } }))
-  await page.route('**/api/learning-chat', route => {
+  await page.route('**/api/learning-chat/stream', route => {
     const body = route.request().postDataJSON()
     selection = { connection_id: body.connection_id, model_id: body.model_id, effort: body.effort }
     const turn = { question: body.question, answer: 'Recorded UI test answer', model_call: selection }
     turns.push(turn)
-    return route.fulfill({ json: { ...turn, selection, session_id: 'example' } })
+    return route.fulfill({ contentType:'text/event-stream', body:'data: ' + JSON.stringify({type:'reasoning',text:'测试思考'}) + '\n\ndata: ' + JSON.stringify({type:'complete',result:{ ...turn, selection, session_id:'example', mode:'tools' }}) + '\n\n' })
   })
   await page.route('**/api/chat/sessions/example/selection', route => {
     selection = route.request().postDataJSON()
@@ -33,6 +33,7 @@ async function check(browser, width) {
   const effort = page.getByRole('button', { name: /思考强度：/ })
   const input = page.getByRole('textbox', { name: '输入学情问题' })
   await menu.waitFor()
+  const initialBox = await composer.boundingBox()
   async function layout() {
     assert.equal(await composer.evaluate(el => getComputedStyle(el).borderTopWidth), '0px')
     assert.equal(await input.evaluate(el => getComputedStyle(el).borderTopWidth), '0px')
@@ -44,6 +45,12 @@ async function check(browser, width) {
     assert.ok(await send.evaluate(el => parseFloat(getComputedStyle(el).borderTopLeftRadius) >= 22))
   }
   await layout()
+  if (width === 390) {
+    await page.setViewportSize({width, height:620})
+    const keyboardBox = await composer.boundingBox()
+    assert.ok(keyboardBox.y >= 0 && keyboardBox.y + keyboardBox.height <= 620, `composer stays visible when viewport shrinks: ${JSON.stringify(keyboardBox)}`)
+    await page.setViewportSize({width, height:900})
+  }
   await menu.focus()
   await page.keyboard.press('ArrowDown')
   const first = page.getByRole('menuitemradio', { name: long })
@@ -60,11 +67,16 @@ async function check(browser, width) {
   await input.fill('Test message')
   await send.click()
   await page.getByText('Recorded UI test answer', { exact: true }).waitFor()
+  const afterBox = await composer.boundingBox()
+  assert.ok(Math.abs(initialBox.y + initialBox.height - afterBox.y - afterBox.height) < 2, 'composer bottom must stay fixed')
+  await page.getByText('思考与执行过程', {exact:true}).click()
+  await page.getByText('测试思考', {exact:true}).waitFor()
   assert.equal(selection.effort, 'high')
   await layout()
   await page.reload()
   await page.getByRole('button', { name: '思考强度：高', exact: true }).waitFor()
   await page.getByText('Recorded UI test answer', { exact: true }).waitFor()
+  assert.equal(await page.getByText('测试思考', {exact:true}).count(), 0, 'reasoning must not survive reload')
   await layout()
   await page.close()
   console.log(`Composer checks passed at ${width}px`)

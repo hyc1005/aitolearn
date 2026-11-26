@@ -8,7 +8,8 @@ from .conversation import (CORRECTION_FIELDS, LATEST, NODE_ID, RECOMMEND, VIEW, 
 from .data import split
 from .learning_chat import model_history, validated_reply
 from .model_transport import ModelRequestError
-from .models import complete_with_tools, model_name
+from .models import complete_with_tools, stream_with_tools, model_name, ToolsUnavailable
+from .chat_stream import chat_events, emit
 from .student_query import answer_rows
 from .search import search
 from .snapshots import table_data
@@ -25,17 +26,27 @@ CATALOG = {
     "read_distribution": ("按已解析班级和测验查询指标得分分布", {"indicator": "画像返回的指标编号"}),
     "read_attachments": ("读取本轮明确上传的参考文件摘录", {}),
     "read_cleaning": ("查询本批清洗状态和可用确认操作", {}),
+    "read_cleaning_issues": ("分页查看最新清洗批次的异常及来源", {"offset": "从 0 开始的条目偏移"}),
     "read_jobs": ("查看最近的后台任务编号、阶段和状态", {}),
+    "read_job_detail": ("读取本轮已发现的任务详情及失败原因", {"run_id": "已发现的任务编号"}),
     "propose_retry": ("为失败或已停止的任务准备重试提案", {"run_id": "工具返回的任务编号"}),
     "propose_stop_job": ("为正在运行或排队的任务准备停止提案", {"run_id": "工具返回的任务编号"}),
     "read_material_reviews": ("查看待校对资料及其版本编号，需教师明确请求查看待校对资料", {}),
+    "read_material_list": ("分页查看待校对资料", {"offset": "从 0 开始的资料偏移"}),
     "propose_publish_material": ("为已读取的待校对资料准备发布提案", {"material_id": "待校对资料编号"}),
     "read_material_review": ("打开已发现的待校对资料，查看可修订的段落", {"material_id": "待校对资料编号"}),
+    "read_material_page": ("分页读取已发现的待校对资料段落及原图位置", {"material_id": "待校对资料编号", "offset": "从 0 开始的段落偏移"}),
     "propose_material_revision": ("提议修订一段资料，发布需另行确认", {
         "material_id": "资料编号", "block_id": "已查看的段落编号", "text": "修订后的段落"}),
     "read_drafts": ("读取当前学生或班级的学习建议草稿和版本", {}),
+    "read_draft_detail": ("读取本轮已发现建议的终审、练习和依据", {"draft_id": "已发现的草稿编号"}),
+    "read_follow_up_options": ("查看已确认学生建议可布置的基线和练习方向", {"draft_id": "已发现的草稿编号"}),
+    "propose_follow_up": ("按教师明确要求登记练后跟踪，需先读取可用选项", {"draft_id": "已发现的草稿编号", "baseline_node": "可用基线测验编号", "directions": "可用方向编号，以 | 分隔"}),
+    "ask_clarification": ("请求教师补充必要信息并暂停本轮", {"question": "需要澄清的问题", "options": "候选项，以 | 分隔；没有候选项则填写 无"}),
     "propose_draft_revision": ("提出一个草稿文字修订，教师确认后重新终审", {
         "draft_id": "已查看的草稿编号", "message": "修订后的建议文字"}),
+    "propose_exercise_revision": ("按教师明确给出的题目顺序或原文提示准备修订", {
+        "draft_id": "已查看的草稿编号", "order": "完整题目编号顺序，以 | 分隔", "hints": "题目编号到提示列表的 JSON 对象，无修改填 {}"}),
     "propose_approve_draft": ("为已读取且终审通过的建议准备教师确认", {"draft_id": "已查看的草稿编号"}),
     "prepare_formal_export": ("准备下载当前快照已确认的正式成果", {}),
     "propose_attempt_correction": ("按老师明确指定的记录字段和新值准备修订，确认后重新清洗", {
@@ -83,6 +94,7 @@ class ChatTools:
         self.materials = set()
         self.material_blocks = {}
         self.drafts = {}
+        self.follow_up_options = {}
 
     def pause(self, card, message):
         self.cards.append(card)
@@ -218,12 +230,30 @@ class ChatTools:
             return self.pause(proposal_card(proposal), "请核对并确认这批数据。")
         return {"status": card["state"], "stage": card["stage"], "batch_id": card["batch_id"]}
 
+    def read_cleaning_issues(self, offset):
+        if not offset.isdigit() or int(offset) > 100000:
+            return {"status": "invalid_offset"}
+        with db() as conn:
+            run = latest_clean(conn)
+            snapshot_id = (((run or {}).get('stages') or {}).get('python') or {}).get('snapshot_id')
+            snapshot = get(conn, 'snapshot', snapshot_id) if snapshot_id else None
+        issues = (snapshot or {}).get('report', {}).get('issues', [])
+        start = int(offset)
+        return {'status': 'ok', 'count': len(issues), 'offset': start, 'issues': issues[start:start + 10]}
+
     def read_jobs(self):
         with db() as conn:
             jobs = sorted(all_of(conn, "job"), key=lambda item: item["created"], reverse=True)[:8]
         self.jobs.update(job["id"] for job in jobs)
         return {"status": "ok", "count": len(jobs), "jobs": [
             {key: job.get(key) for key in ("id", "kind", "state", "stage")} for job in jobs]}
+
+    def read_job_detail(self, run_id):
+        with db() as conn:
+            job = get(conn, 'job', run_id) if run_id in self.jobs else None
+        if not job:
+            return {'status': 'missing'}
+        return {'status': 'ok', **{key: job.get(key) for key in ('id', 'kind', 'state', 'stage', 'error', 'model_error', 'result')}}
 
     def propose_retry(self, run_id):
         with db() as conn:
@@ -248,7 +278,7 @@ class ChatTools:
         return self.pause(proposal_card(proposal), "请确认停止此任务。")
 
     def read_material_reviews(self):
-        if not any(word in self.request.question for word in ("资料", "教材", "发布", "校对")):
+        if not any(word in self.request.question.lower() for word in ("资料", "教材", "发布", "校对", "识别", "扫描", "图片", "ocr")):
             return {"status": "missing"}
         with db() as conn:
             docs = [item for item in all_of(conn, "material") if item["state"] == "review"][:8]
@@ -256,6 +286,19 @@ class ChatTools:
         items = [{"id": doc["id"], "name": doc["name"]} for doc in docs]
         self.cards.append({"kind": "navigation", "page": "materials", "title": PAGES["materials"]})
         return {"status": "ok", "count": len(items), "materials": items}
+
+    def read_material_list(self, offset):
+        if not offset.isdigit() or int(offset) > 100000:
+            return {'status': 'invalid_offset'}
+        if not any(word in self.request.question.lower() for word in ('资料', '教材', '发布', '校对', '识别', '扫描', '图片', 'ocr')):
+            return {'status': 'missing'}
+        with db() as conn:
+            docs = [item for item in all_of(conn, 'material') if item.get('state') == 'review']
+        start = int(offset)
+        selected = docs[start:start + 8]
+        self.materials.update(doc['id'] for doc in selected)
+        return {'status': 'ok', 'count': len(docs), 'offset': start,
+                'materials': [{'id': doc['id'], 'name': doc['name']} for doc in selected]}
 
     def propose_publish_material(self, material_id):
         with db() as conn:
@@ -275,6 +318,27 @@ class ChatTools:
         self.material_blocks[material_id] = material_version(doc), {block["id"]: block["text"] for block in blocks}
         return {"status": "ok", "count": len(blocks), "blocks": [
             {"id": block["id"], "text": block["text"][:500]} for block in blocks]}
+
+    def read_material_page(self, material_id, offset):
+        if not offset.isdigit() or int(offset) > 100000:
+            return {'status': 'invalid_offset'}
+        with db() as conn:
+            doc = get(conn, 'material', material_id) if material_id in self.materials else None
+        if not doc or doc.get('state') != 'review':
+            return {'status': 'missing'}
+        start = int(offset)
+        blocks = doc['blocks'][start:start + 8]
+        version = material_version(doc)
+        old_version, known = self.material_blocks.get(material_id, ('', {}))
+        known = dict(known) if old_version == version else {}
+        known.update({block['id']: block['text'] for block in blocks})
+        self.material_blocks[material_id] = (version, known)
+        self.cards.append({'kind': 'material_blocks', 'material_id': material_id, 'name': doc['name'],
+                           'offset': start, 'count': len(doc['blocks']),
+                           'blocks': [{key: block.get(key) for key in ('id', 'text', 'locator')} for block in blocks]})
+        return {'status': 'ok', 'count': len(doc['blocks']), 'offset': start,
+                'blocks': [{key: block.get(key) for key in ('id', 'text', 'locator', 'bbox')} for block in blocks],
+                'preview_available': bool(doc.get('previews'))}
 
     def propose_material_revision(self, material_id, block_id, text):
         version, blocks = self.material_blocks.get(material_id, ("", {}))
@@ -301,6 +365,52 @@ class ChatTools:
             {"id": draft["id"], "revision": draft["revision"], "message": self.draft_text(draft)[:500],
              "review_state": draft.get("review_state"), "approved": draft.get("approved", False)}
             for draft in drafts]}
+
+    def read_draft_detail(self, draft_id):
+        draft = self.drafts.get(draft_id)
+        if not draft:
+            return {'status': 'missing'}
+        return {'status': 'ok', **{key: draft.get(key) for key in (
+            'id', 'revision', 'snapshot_id', 'student', 'group', 'node', 'observation', 'uncertainty',
+            'teaching_points', 'exercises', 'message', 'review_state', 'final_review', 'approved')},
+            'evidence': [{key: item.get(key) for key in ('id', '材料编号', '节点编号', '得分', '满分')}
+                         for item in draft.get('evidence', [])[:6]],
+            'citations': [{key: item.get(key) for key in ('id', 'material', 'locator')}
+                          | {'text': item.get('text', '')[:400]} for item in draft.get('citations', [])[:6]]}
+
+    def read_follow_up_options(self, draft_id):
+        from .follow_up import options
+        from .student_query import metadata
+        draft = self.drafts.get(draft_id)
+        if not draft or not draft.get('approved') or not draft.get('student'):
+            return {'status': 'not_ready'}
+        with db() as conn:
+            available = options(conn, draft, metadata(conn, draft['snapshot_id']))
+        self.follow_up_options[draft_id] = available
+        return {'status': 'ok', **available}
+
+    def propose_follow_up(self, draft_id, baseline_node, directions):
+        if not any(word in self.request.question for word in ('布置', '登记', '跟踪')):
+            return {'status': 'explicit_request_required'}
+        draft, available = self.drafts.get(draft_id), self.follow_up_options.get(draft_id)
+        selected = [item.strip() for item in directions.split('|') if item.strip()]
+        if (not draft or not available or not selected or len(selected) != len(set(selected))
+                or baseline_node not in {item['id'] for item in available['nodes']}
+                or not set(selected) <= {item['id'] for item in available['directions']}):
+            return {'status': 'invalid_selection'}
+        with db() as conn:
+            from .snapshots import current_snapshot
+            active = current_snapshot(conn)
+            if not active or active['id'] != draft['snapshot_id']:
+                return {'status': 'stale_snapshot'}
+            proposal = make_proposal(conn, 'assign_follow_up', {'draft_id': draft_id,
+                'revision': draft['revision'], 'snapshot_id': draft['snapshot_id'], 'version': material_version(draft),
+                'student': draft['student'], 'baseline_node': baseline_node, 'directions': selected})
+        return self.pause(proposal_card(proposal), '请核对学生、基线和练习方向后确认。')
+
+    def ask_clarification(self, question, options):
+        choices = [] if options == '无' else [item.strip() for item in options.split('|') if item.strip()][:6]
+        return self.pause({'kind': 'clarification', 'prompt': question, 'options': choices}, question)
 
     def propose_approve_draft(self, draft_id):
         draft = self.drafts.get(draft_id)
@@ -339,6 +449,32 @@ class ChatTools:
             return {"status": "missing"}
         return self.revision("revise_draft", {"draft_id": draft_id, "revision": draft["revision"],
             "version": material_version(draft), "before": self.draft_text(draft), "after": message})
+
+    def propose_exercise_revision(self, draft_id, order, hints):
+        draft = self.drafts.get(draft_id)
+        if not draft or not any(word in self.request.question for word in ('修改', '调整', '修订', '排序')):
+            return {'status': 'explicit_request_required'}
+        try:
+            ordered = [item.strip() for item in order.split('|') if item.strip()]
+            changes = json.loads(hints)
+            ids = [item['question_id'] for item in draft['exercises']]
+            if (len(ordered) != len(ids) or set(ordered) != set(ids) or not isinstance(changes, dict)
+                    or not set(changes) <= set(ids) or any(not isinstance(values, list) or not 1 <= len(values) <= 4
+                    or any(not isinstance(v, str) or not v.strip() or v not in self.request.question for v in values)
+                    for values in changes.values())):
+                raise ValueError
+            if ordered != ids and any(item not in self.request.question for item in ordered):
+                raise ValueError
+            existing = {item['question_id']: item.get('hints', []) for item in draft['exercises']}
+            if ordered == ids and all(existing[key] == value for key, value in changes.items()):
+                return {'status': 'missing'}
+        except (ValueError, TypeError):
+            return {'status': 'invalid_selection'}
+        before = '顺序：' + '、'.join(ids) + ''.join('\n' + key + '：' + '；'.join(existing[key]) for key in changes)
+        after = '顺序：' + '、'.join(ordered) + ''.join('\n' + key + '：' + '；'.join(value) for key, value in changes.items())
+        return self.revision('revise_exercises', {'draft_id': draft_id, 'revision': draft['revision'],
+            'version': material_version(draft), 'before': before, 'after': after,
+            'order': ordered, 'hints': changes})
 
     def propose_attempt_correction(self, event_id, field, value):
         if (field not in CORRECTION_FIELDS or field not in self.request.question or value not in self.request.question
@@ -396,7 +532,16 @@ def run_chat(request, snapshot, provider):
     for round_index in range(4):
         for attempt in range(2):
             try:
-                message = complete_with_tools(provider, messages, session, tools=TOOLS, max_tokens=1200)
+                if chat_events.get():
+                    try:
+                        message = stream_with_tools(provider, messages, session, tools=TOOLS, max_tokens=1200)
+                    except ToolsUnavailable:
+                        emit('reasoning_unavailable')
+                        message = complete_with_tools(provider, messages, session, tools=TOOLS, max_tokens=1200)
+                        if isinstance(message.get('reasoning_content'), str):
+                            emit('reasoning', text=message['reasoning_content'])
+                else:
+                    message = complete_with_tools(provider, messages, session, tools=TOOLS, max_tokens=1200)
                 break
             except ModelRequestError as error:
                 if error.code == "response" and attempt == 0:
@@ -435,6 +580,7 @@ def run_chat(request, snapshot, provider):
             started = monotonic()
             function = call.get("function") or {}
             name = function.get("name")
+            emit('tool_start', tool=name if name in CATALOG else 'unknown')
             try:
                 args = json.loads(function.get("arguments") or "{}")
                 if name not in CATALOG or not isinstance(args, dict) or args.keys() != CATALOG[name][1].keys():
@@ -451,6 +597,7 @@ def run_chat(request, snapshot, provider):
             trace.append({"tool": name if name in CATALOG else "unknown", "status": output["status"],
                           "count": output.get("count"), "elapsed_ms": round((monotonic() - started) * 1000),
                           **{key: output[key] for key in ("student", "group", "node", "snapshot_id", "indicator") if key in output}})
+            emit('tool_end', **trace[-1])
             if tools.paused:
                 return {"answer": output["message"], "parts": [], "cards": tools.cards, "trace": trace,
                         "model": model_name(provider)}

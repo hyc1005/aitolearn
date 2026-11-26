@@ -27,16 +27,17 @@ async function check(browser, width) {
   await page.route('**/api/models/connections', route => route.fulfill({ json:{ default:selection, connections:[{
     id:'local', name:'模拟连接', adapter:'custom', configured:true, models:[{ id:selection.model_id, enabled:true, efforts:['default'], verified:['default'] }],
   }] } }))
-  await page.route('**/api/learning-chat', async route => {
+  await page.route('**/api/learning-chat/stream', async route => {
     sent++
     const body = route.request().postDataJSON()
     assert.equal(body.student, '示例01')
     if (sent === 1) return route.fulfill({ status:503, json:{ detail:'模拟服务暂不可用' } })
     if (sent === 4) await new Promise(resolve => { release = resolve })
     const answer = sent === 2 ? response : Array(12).fill(response).join('\n\n')
-    return route.fulfill({ json:{ answer, context:scope, elapsed_ms:1800, model_call:selection,
+    const result = { answer, context:scope, elapsed_ms:1800, model_call:selection,
       parts:[{quote:'通分后再进行计算。', source:{kind:'material', title:citation.title, locator:citation.locator, citation}}],
-      trace:[{tool:'search_materials', status:'ok', count:1}], cards:[] } })
+      trace:[{tool:'search_materials', status:'ok', count:1}], cards:[] }
+    return route.fulfill({contentType:'text/event-stream',body:'data: '+JSON.stringify({type:'complete',result})+'\n\n'})
   })
   try {
     await page.goto(url)
@@ -79,7 +80,7 @@ async function check(browser, width) {
     await page.locator('.ant-drawer-close:visible').click()
     await page.getByRole('dialog').waitFor({state:'hidden'})
     await page.waitForFunction(() => document.activeElement?.textContent?.includes('赛题题库与学习卡'))
-    await page.getByText('执行过程与依据 · 1 步',{exact:true}).click()
+    await page.getByText('思考与执行过程 · 1 步',{exact:true}).click()
     await page.getByText(/检索资料 · 1 条 · 已完成/).waitFor()
     await screenshot(page, `after-answer-${width}`)
 
@@ -91,12 +92,12 @@ async function check(browser, width) {
     await page.getByText('正在回答',{exact:false}).first().waitFor()
     for (let i = 0; i < 100 && !release; i++) await new Promise(resolve => setTimeout(resolve, 10))
     assert.ok(release, 'follow-up request should be waiting')
-    await page.evaluate(() => window.scrollTo(0, 0))
+    await page.locator('.chat-thread').evaluate(el => { el.scrollTop = 0 })
     const jump = page.getByRole('button',{name:'回到最新消息'})
     await jump.waitFor()
     release()
     await page.locator('.chat-reply-text').nth(2).waitFor()
-    assert.ok(await page.evaluate(() => scrollY < 10), 'new reply must not steal scroll position')
+    assert.ok(await page.locator('.chat-thread').evaluate(el => el.scrollTop < 10), 'new reply must not steal scroll position')
     await jump.click()
     await jump.waitFor({ state:'hidden' })
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))

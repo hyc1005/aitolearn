@@ -104,7 +104,9 @@ class ModelTransport(httpx.BaseTransport):
             else:
                 try:
                     response = self.transport.handle_request(request)
-                    response.read()
+                    streaming = request.headers.get('accept') == 'text/event-stream'
+                    if not streaming or response.status_code >= 400:
+                        response.read()
                     code = response_code(response)
                 except httpx.RequestError as error:
                     if response is not None:
@@ -112,7 +114,7 @@ class ModelTransport(httpx.BaseTransport):
                         response = None
                     code = "timeout" if isinstance(error, httpx.TimeoutException) else "connection"
             finish_reason = ""
-            if response is not None and not code:
+            if response is not None and not code and not streaming:
                 try:
                     choices = response.json().get("choices", [])
                     reason = choices[0].get("finish_reason") if choices else None

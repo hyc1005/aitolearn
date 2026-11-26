@@ -436,7 +436,7 @@ function Workbench() {
   return <Layout className="shell">
     <Layout.Sider width={!mobile && rail ? 72 : 216} className={'sidebar' + (!mobile && rail ? ' sidebar-rail' : '')}>
       <div className="brand">
-        <span className="brand-symbol"><NavIcon name="agent" /></span>
+        <span className="brand-symbol" role="img" aria-label="智慧学伴"><svg aria-hidden="true" className="brand-mascot" viewBox="0 0 48 48" fill="none"><rect x="4" y="4" width="40" height="40" rx="13" fill="#b1aaf1"/><path d="M12 17c4-2.4 8-2.1 12 1 4-3.1 8-3.4 12-1v15c-4-2-8-1.8-12 1-4-2.8-8-3-12-1z" fill="#fff9e9" stroke="#38315e" strokeWidth="2" strokeLinejoin="round"/><path d="M24 18v15M17.5 23.5h.1m12.8 0h.1M20 27c2 2 6 2 8 0" stroke="#38315e" strokeWidth="2" strokeLinecap="round"/><path d="M34 9v5m-2.5-2.5h5" stroke="#ffe49d" strokeWidth="2" strokeLinecap="round"/></svg></span>
         <div className="brand-name" aria-label="智慧学伴">智慧学伴</div>
         <Tooltip title={navAction} placement={mobile ? 'bottom' : 'right'}>
           <button type="button" className="nav-toggle" ref={navToggle} aria-label={navAction} aria-controls="workbench-navigation"
@@ -463,7 +463,7 @@ function Workbench() {
         openStudent={(id, node, snapshot, indicator) => openProfile('student', id, node, snapshot, indicator)}
         openGroup={(id, node, snapshot, indicator) => openProfile('group', id, node, snapshot, indicator)}
         launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
-      <div hidden={page !== 'chat'}>
+      <div className="chat-page" hidden={page !== 'chat'}>
         <LearningChat active={page === 'chat'} snapshot={activeSnapshot}
           pendingRun={latestClean?.stage === 'confirm' && latestClean.state === 'done' ? latestClean.id : undefined}
           openAdvice={target => setNewAdvice(target)}

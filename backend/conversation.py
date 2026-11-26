@@ -14,8 +14,8 @@ from .models import active_provider, provider_key
 from .snapshots import current_snapshot, table_data
 from .store import all_of, get, new_id, put
 
-SUPPORTED = {"generate_recommendation", "confirm_import", "publish_material", "retry_job", "stop_job", "approve_draft",
-             "correct_attempt", "revise_draft", "revise_material"}
+SUPPORTED = {"generate_recommendation", "confirm_import", "publish_material", "retry_job", "stop_job", "approve_draft", "assign_follow_up",
+             "correct_attempt", "revise_draft", "revise_material", "revise_exercises"}
 CORRECTION_FIELDS = {"学生编号", "材料编号", "主题编号", "节点编号", "评分状态", "得分", "满分", "评分点得分"}
 MAX_TURNS = 60
 STUDENT_ID = re.compile(r"(?<![A-Z0-9])([A-Z]{1,4}\d{2,4})(?![A-Z0-9])")
@@ -167,7 +167,8 @@ def proposal_card(item):
     labels = {"confirm_import": "确认数据", "generate_recommendation": "生成学习建议",
               "publish_material": "发布教学资料", "retry_job": "重试任务",
               "correct_attempt": "修正作答异常", "revise_draft": "修订学习建议", "revise_material": "校订资料",
-              "approve_draft": "确认学习建议", "stop_job": "停止任务"}
+              "approve_draft": "确认学习建议", "stop_job": "停止任务", "assign_follow_up": "登记练后跟踪",
+              "revise_exercises": "修订练习"}
     return {"kind": "proposal", "id": item["id"], "action": item["kind"],
             "title": item.get("title") or labels[item["kind"]],
             "status": item.get("status", "pending"), "payload": item.get("payload", {}),

@@ -519,6 +519,74 @@ class WorkflowTests(TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()['result']['run_id'], 'task')
 
+    def test_agent_registers_follow_up_only_after_confirmation(self):
+        batch = self.post_import()
+        self.run_cleaning(batch['run_id'])
+        sid = self.confirm(batch).json()['snapshot_id']
+        draft = {'id': 'draft', 'student': 'D01', 'group': '', 'node': 'N01', 'revision': 1,
+                 'snapshot_id': sid, 'message': '复习', 'exercises': [{'question_id': 'Q015', 'hints': ['原提示']}],
+                 'approved': True, 'review_state': 'pass'}
+        with store.db() as conn:
+            store.put(conn, 'draft', 'draft', draft)
+            snapshot = store.get(conn, 'snapshot', sid)
+        tools = ChatTools(ChatRequest(question='为 D01 登记练后跟踪'), snapshot)
+        tools.resolve_scope()
+        tools.read_drafts()
+        options = tools.read_follow_up_options('draft')
+        self.assertEqual(options['status'], 'ok')
+        direction = options['directions'][0]['id']
+        self.assertEqual(tools.propose_follow_up('draft', options['default_node'], direction)['status'], 'waiting')
+        with store.db() as conn:
+            self.assertEqual(store.all_of(conn, 'recommendation_follow_up'), [])
+        path = '/api/chat/proposals/' + tools.cards[-1]['id'] + '/confirm'
+        result = self.client.post(path)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(self.client.post(path).json()['result'], result.json()['result'])
+        with store.db() as conn:
+            self.assertEqual(len(store.all_of(conn, 'recommendation_follow_up')), 1)
+
+    def test_material_pagination_and_exercise_changes_are_scoped(self):
+        doc = {'id':'doc', 'name':'扫描教材', 'state':'review', 'previews':{'原图':'x'},
+               'blocks':[{'id':str(i), 'text':f'段落{i}', 'locator':'原图', 'bbox':[1,2,3,4]} for i in range(12)]}
+        with store.db() as conn:
+            store.put(conn, 'material', 'doc', doc)
+        tools = ChatTools(ChatRequest(question='查看待校对资料'), None)
+        self.assertEqual(tools.read_material_page('doc','8')['status'], 'missing')
+        self.assertEqual(tools.read_material_list('0')['materials'][0]['id'], 'doc')
+        page = tools.read_material_page('doc','8')
+        self.assertEqual((page['count'], page['blocks'][0]['id'], page['blocks'][0]['locator']), (12, '8', '原图'))
+        self.assertEqual(tools.propose_material_revision('doc','8','更正')['status'], 'waiting')
+
+    def test_clarification_pauses_without_writing_business_data(self):
+        tools = ChatTools(ChatRequest(question='帮我分析'), None)
+        result = tools.ask_clarification('要看哪个班？', 'A班|B班')
+        self.assertEqual(result['status'], 'waiting')
+        self.assertEqual(tools.cards[-1]['options'], ['A班', 'B班'])
+        with store.db() as conn:
+            self.assertEqual(store.all_of(conn, 'proposal'), [])
+
+    def test_agent_exercise_revision_requires_explicit_text_and_rereview(self):
+        batch = self.post_import()
+        self.run_cleaning(batch['run_id'])
+        sid = self.confirm(batch).json()['snapshot_id']
+        draft = {'id':'draft', 'student':'D01', 'group':'', 'node':'N01', 'revision':1,
+                 'snapshot_id':sid, 'message':'复习', 'exercises':[{'question_id':'Q015','hints':['原提示']}],
+                 'approved':True, 'review_state':'pass'}
+        with store.db() as conn:
+            store.put(conn,'draft','draft',draft)
+            snapshot = store.get(conn,'snapshot',sid)
+        tools = ChatTools(ChatRequest(question='将 D01 的 Q015 提示修改为先去括号'), snapshot)
+        tools.resolve_scope()
+        tools.read_drafts()
+        self.assertEqual(tools.propose_exercise_revision('draft','Q015','{"Q015":["模型编造"]}')['status'], 'invalid_selection')
+        self.assertEqual(tools.propose_exercise_revision('draft','Q015','{"Q015":["先去括号"]}')['status'], 'waiting')
+        response = self.client.post('/api/chat/proposals/' + tools.cards[-1]['id'] + '/confirm')
+        self.assertEqual(response.status_code, 200, response.text)
+        with store.db() as conn:
+            saved = store.get(conn,'draft','draft')
+        self.assertEqual(saved['exercises'][0]['hints'], ['先去括号'])
+        self.assertEqual((saved['revision'], saved['approved'], saved['review_state']), (2, False, 'pending'))
+
     def test_final_review_rejects_fabricated_reference(self):
         draft = {"revision": 1, "observation": "", "uncertainty": "", "evidence": [], "citations": [],
                  "profile": {"axes": []}, "exercises": [], "questions": {}, "checked_variant": None,

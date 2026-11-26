@@ -5,6 +5,8 @@ import hmac
 import io
 import json
 import time
+import queue
+import threading
 from zipfile import BadZipFile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,7 +15,7 @@ from urllib.parse import urlparse
 import httpx
 import keyring
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from keyring.errors import KeyringError
 from pydantic import BaseModel, Field, SecretStr
@@ -228,6 +230,48 @@ def learning_chat(request: ChatRequest):
         return {**result, "session_id": saved["id"], "context": saved["context"]}
 
 
+@app.post('/api/learning-chat/stream')
+def learning_chat_stream(request: ChatRequest):
+    """Stream transient reasoning/tool events; only the verified final turn is stored."""
+    from .chat_stream import chat_events
+    events = queue.Queue()
+    closed = threading.Event()
+
+    def emit_event(event):
+        if not closed.is_set():
+            events.put(event)
+
+    def run():
+        token = chat_events.set(emit_event)
+        try:
+            emit_event({'type': 'complete', 'result': learning_chat(request)})
+        except HTTPException as error:
+            emit_event({'type': 'error', 'message': str(error.detail), 'status': error.status_code})
+        except Exception:
+            emit_event({'type': 'error', 'message': '对话处理失败，请重试', 'status': 500})
+        finally:
+            chat_events.reset(token)
+            events.put(None)
+
+    def body():
+        threading.Thread(target=run, daemon=True).start()
+        try:
+            while True:
+                try:
+                    event = events.get(timeout=15)
+                except queue.Empty:
+                    yield ': keepalive\n\n'
+                    continue
+                if event is None:
+                    break
+                yield 'data: ' + json.dumps(event, ensure_ascii=False) + '\n\n'
+        finally:
+            closed.set()
+
+    return StreamingResponse(body(), media_type='text/event-stream', headers={'Cache-Control': 'no-store',
+                                                                              'X-Accel-Buffering': 'no'})
+
+
 @app.get("/api/chat/sessions")
 def chat_sessions():
     with db() as conn:
@@ -357,6 +401,17 @@ def confirm_proposal(key: str):
             proposal.update(status="confirmed", result=result, confirmed_at=time.time())
             put(conn, "proposal", key, proposal)
             return {"proposal": proposal_card(proposal), "result": result}
+        if proposal['kind'] == 'assign_follow_up':
+            from .follow_up import Assignment, assign_in
+            draft = require(conn, 'draft', payload['draft_id'])
+            active = current_snapshot(conn)
+            if not active or active['id'] != payload['snapshot_id'] or material_version(draft) != payload['version']:
+                raise HTTPException(409, '数据快照或建议版本已变化，请重新核对。')
+            result = assign_in(conn, payload['draft_id'], Assignment(revision=payload['revision'],
+                baseline_node=payload['baseline_node'], directions=payload['directions']))
+            proposal.update(status='confirmed', result=result, confirmed_at=time.time())
+            put(conn, 'proposal', key, proposal)
+            return {'proposal': proposal_card(proposal), 'result': result}
         if proposal["kind"] == "publish_material":
             doc = require(conn, "material", payload["material_id"])
             if material_version(doc) != payload["version"]:
@@ -375,7 +430,7 @@ def confirm_proposal(key: str):
             proposal.update(status="confirmed", result=result, confirmed_at=time.time())
             put(conn, "proposal", key, proposal)
             return {"proposal": proposal_card(proposal), "result": result}
-        elif proposal["kind"] in {"revise_material", "revise_draft", "correct_attempt"}:
+        elif proposal["kind"] in {"revise_material", "revise_draft", "revise_exercises", "correct_attempt"}:
             result = confirm_chat_revision(conn, proposal["kind"], payload)
             proposal.update(status="confirmed", result=result, confirmed_at=time.time())
             put(conn, "proposal", key, proposal)
@@ -401,6 +456,13 @@ def confirm_chat_revision(conn, action, payload):
         saved = edit_draft(conn, draft["id"], Edit(revision=payload["revision"], approved=False,
             message=payload["after"], exercises=[item["question_id"] for item in draft["exercises"]]))
         return {"run_id": saved["review_run_id"], "draft_id": saved["id"]}
+    if action == 'revise_exercises':
+        draft = require(conn, 'draft', payload['draft_id'])
+        if material_version(draft) != payload['version']:
+            raise HTTPException(409, '草稿版本已变化，请重新核对。')
+        saved = edit_draft(conn, draft['id'], Edit(revision=payload['revision'], approved=False,
+            message=draft.get('message', draft.get('follow_up', '')), exercises=payload['order'], hints=payload['hints']))
+        return {'run_id': saved.get('review_run_id'), 'draft_id': saved['id']}
     active = current_snapshot(conn)
     if not active or active["id"] != payload["snapshot_id"]:
         raise HTTPException(409, "数据快照已变化，请重新核对作答。")
