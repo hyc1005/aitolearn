@@ -65,6 +65,14 @@ class ModelTransportTests(unittest.TestCase):
                         structured_review(CleaningReview, "", {}, "test")
                 self.assertEqual(failed.exception.code, expected)
 
+    def test_cleaning_review_retries_truncated_output_with_larger_budget(self):
+        from backend.cleaning_agent import validated_review
+        value = CleaningReview(summary='已隔离异常', findings=[], decision='ready')
+        with patch('backend.cleaning_agent.structured_review', side_effect=[ModelRequestError('truncated'), (value, 'test')]) as call:
+            result, _ = validated_review(CleaningReview, '复核', {}, 'session', lambda _: True)
+        self.assertEqual(result.decision, 'ready')
+        self.assertEqual(call.call_args_list[1].kwargs['max_tokens'], 6000)
+
     def test_structured_output_limit_reaches_upstream_request(self):
         received = []
 

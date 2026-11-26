@@ -1,9 +1,14 @@
 """Run one local document OCR job and print machine-readable blocks."""
 import contextlib
 import json
+import os
 import sys
 
 from PIL import Image
+
+# Avoid a network availability probe on every local OCR subprocess; cached
+# models remain usable offline. Missing models still require installation.
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 with contextlib.redirect_stdout(sys.stderr):
     from paddleocr import PPStructureV3

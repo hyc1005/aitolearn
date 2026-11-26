@@ -13,6 +13,8 @@ Windows 原生应用。前端使用 React、Ant Design 和 ECharts。后端使�
 
 可用 `setup.ps1 -Python C:\path\python.exe` 指定解释器。仅验证数字 PDF、表格和 UI 时用 `setup.ps1 -SkipOcr -KeywordOnly`，并以 `start.ps1 -KeywordOnly` 启动。Windows x64 的 Python 3.12 关键词模式使用验收时固定的依赖版本。混合检索需要完整安装和首次向量模型下载。
 
+扫描 PDF、图片和 Word 内嵌图片使用独立的 `.venv-ocr`。健康接口的 `ocr_configured` 只表示 OCR Python 路径存在；运行 `scripts/doctor.ps1` 可检查 Paddle 与 PaddleOCR 是否能够导入，识别是否可用还应实际测试图片。复杂数学版面在 CPU 上可能较慢，每页最多等待 10 分钟；识别结果需校对后发布。
+
 ## 首页与七个入口
 
 根地址与首页按钮都进入**学情对话**。左侧固定七项：
@@ -38,6 +40,7 @@ Windows 原生应用。前端使用 React、Ant Design 和 ECharts。后端使�
 - 首版对话任务包括：选择本机文件并启动导入清洗、查看清洗计数/异常/复核状态并确认本批数据、按班级/学生/某条作答生成学习建议并进入审核。
 - 上传、清洗、待确认、生成、终审、完成和失败均取自后端。失败消息保留原问题、文件名或任务编号，并提供重试入口。
 - 对话和关联任务写入本地 SQLite。刷新页面后恢复历史；已提交的后台任务继续执行，可从卡片的「打开任务」重新查看。
+- 可以要求 Agent 查看建议并准备确认、查询任务并准备停止或重试，以及准备下载当前快照的正式成果。确认建议前须通过终审；对话卡片中的确认会重新核对建议版本和快照。停止正在运行的任务会在支持的阶段检查点生效。正式导出下载时再次检查快照。
 - 提案由后端校验对象、批次和快照后生成编号；重复确认返回同一结果。快照变化时展示变化并允许按新快照重新确认。
 
 ## 使用引导
@@ -95,6 +98,34 @@ Windows 原生应用。前端使用 React、Ant Design 和 ECharts。后端使�
     .\.venv\Scripts\python.exe -m scripts.clean_data --input path\to\workbook.xlsx --output var\cleaning-check
 
 开发前端热更新使用 `npm.cmd --prefix frontend run dev`，API 由 Vite 代理。OpenAPI 位于 `/docs`。
+
+## Agent 命令行
+
+启动工作台后，命令行可以直接调用与界面相同的本机业务 API，不需要浏览器或模拟点击。输出为 UTF-8 JSON：`ok` 表示 HTTP 是否成功，`status` 是状态码，`data` 是接口结果；失败退出码非零。此入口不自动确认或发布，按接口要求先核对提案再调用确认接口。
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.agent_cli schema
+.\.venv\Scripts\python.exe -m scripts.agent_cli request GET /api/health
+.\.venv\Scripts\python.exe -m scripts.agent_cli request GET /api/jobs
+.\.venv\Scripts\python.exe -m scripts.agent_cli chat '查看任务状态'
+.\.venv\Scripts\python.exe -m scripts.agent_cli request POST /api/learning-chat --json '{"question":"查看任务状态","use_tools":true}'
+.\.venv\Scripts\python.exe -m scripts.agent_cli request POST /api/imports/preview --file 'files=C:\path\sample.xlsx'
+.\.venv\Scripts\python.exe -m scripts.agent_cli request POST /api/chat/attachments/inspect --file 'file=C:\path\photo.png'
+.\.venv\Scripts\python.exe -m scripts.agent_cli request GET '/api/export?format=json&formal=true' --output result.json
+```
+
+`--file` 和 `--field NAME=VALUE` 可重复；`--json -` 从标准输入读取 JSON。下载只允许 GET 且不会覆盖已有文件；使用 `--port` 和 `--timeout` 指定本机端口及请求超时。`schema` 返回接口完整定义，数据写入、资料校对发布、任务与快照管理均调用各自的 API；实际可用能力及教师确认约束以 API 为准。
+
+例如，Agent 可以先用上面的 `inspect` 检查图片，再提交并记录返回卡片中的 `run_id`，查询任务直到完成，读取资料校对后再发布：
+
+```powershell
+$batchId = [guid]::NewGuid().ToString()
+.\.venv\Scripts\python.exe -m scripts.agent_cli request POST /api/chat/attachments/submit --field "batch_id=$batchId" --file 'files=C:\path\photo.png'
+.\.venv\Scripts\python.exe -m scripts.agent_cli request GET /api/agent/runs/任务编号
+.\.venv\Scripts\python.exe -m scripts.agent_cli request GET /api/materials/资料编号
+```
+
+继续对话可使用 `chat '下一步问题' --session 会话编号`。返回的提案需核对后调用 `POST /api/chat/proposals/提案编号/confirm`；OCR 原文可能有识别错误，应先对照原图校对。
 
 ## 关键位置
 

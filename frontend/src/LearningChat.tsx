@@ -511,10 +511,11 @@ export function LearningChat(props: Props) {
                 search_materials: '检索资料', open_import: '定位数据导入', read_cleaning: '查看清洗进度',
                 read_follow_ups: '读取练后回看', read_distribution: '读取班级分布', read_attachments: '读取本轮附件', queue_student_import: '启动学情清洗', queue_material_extract: '启动资料解析', read_progress: '汇总历次成绩',
                 propose_recommendation: '准备建议任务', open_page: '定位业务页面', read_exercises: '查找练习',
-                read_jobs: '查询任务', propose_retry: '准备重试', read_material_reviews: '查询待校对资料',
+                read_jobs: '查询任务', propose_retry: '准备重试', propose_stop_job: '准备停止任务', read_material_reviews: '查询待校对资料',
                 read_material_review: '读取待校对段落', propose_publish_material: '准备发布',
                 propose_material_revision: '准备资料修订', read_drafts: '读取建议版本',
-                propose_draft_revision: '准备建议修订', propose_attempt_correction: '准备作答修订',
+                propose_draft_revision: '准备建议修订', propose_approve_draft: '准备确认建议',
+                prepare_formal_export: '准备导出成果', propose_attempt_correction: '准备作答修订',
               } as Record<string, string>)[step.tool] || '校验工具'}
               {[step.student || step.group, step.node, step.indicator].filter(Boolean).map(value => ' · ' + value)}
               {step.count != null && ' · ' + step.count + (step.origin ? ' 份' : ' 条')}
@@ -620,6 +621,15 @@ function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, choose
   if (card.kind === 'navigation') return <Card size="small" className="chat-card" title={card.title}>
     <Button onClick={() => openPage(card.page)}>打开{card.title}</Button>
   </Card>
+  if (card.kind === 'formal_export') return <Card size="small" className="chat-card" title="导出正式成果">
+    <p>当前快照包含 {card.count} 条已确认建议；下载时会再次核对快照。</p>
+    <Button type="primary" href={'/api/export?format=json&formal=true&expected_snapshot=' + encodeURIComponent(card.snapshot_id)}>下载 JSON</Button>
+  </Card>
+  if (card.kind === 'drafts') return <Card size="small" className="chat-card" title="学习建议">
+    {card.items.map((item: {id: string; revision: number; message: string; review_state?: string; approved: boolean}) =>
+      <div key={item.id}><p>版本 {item.revision} · {item.approved ? '已确认' : item.review_state === 'pass' ? '终审通过，待确认' : '尚未通过终审'}</p>
+        <p className="preserve">{item.message}</p><Button onClick={() => openDraft(item.id)}>查看完整建议</Button></div>)}
+  </Card>
   if (card.kind === 'exercises') return <Card size="small" className="chat-card" title="相关练习">
     <ul>{card.items.map((item: { id: string; text: string }) => <li key={item.id}>{item.id} · {item.text}</li>)}</ul>
   </Card>
@@ -677,6 +687,8 @@ function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, choose
       <p>{card.payload?.before !== undefined ? (confirmed ? '修订已提交。' : '核对以下改动后再确认。')
         : card.action === 'publish_material' ? (confirmed ? '资料已进入发布队列。' : '确认后开始建立索引并发布这个资料版本。')
         : card.action === 'retry_job' ? (confirmed ? '任务已重新排队。' : '确认后重试这次失败的任务。')
+        : card.action === 'stop_job' ? (confirmed ? '停止请求已提交。正在运行的任务会在可停止的阶段结束。' : '确认后停止这个任务。')
+        : card.action === 'approve_draft' ? (confirmed ? '学习建议已确认。' : `确认第 ${card.payload?.revision} 版通过终审的学习建议。`)
         : confirmed ? (card.action === 'confirm_import' ? '这批数据已确认，后续诊断和建议读取同一快照。'
         : '建议任务已开始，进度与终审结果会保留在任务详情。')
         : (card.action === 'confirm_import' ? '复核已完成。确认后建立数据快照，后续诊断和建议都读取该快照。'
@@ -693,6 +705,7 @@ function ResultCard({ card, api, snapshot, readEvidence, confirmProposal, choose
           openRun={openRun} openDraft={openDraft} openPage={openPage} />}
         {confirmed && card.result?.snapshot_id && <Tag color="success">快照已启用</Tag>}
         {confirmed && card.action === 'revise_material' && <Button onClick={() => openPage('materials')}>打开课程与资料</Button>}
+        {card.action === 'approve_draft' && <Button onClick={() => openDraft(card.payload.draft_id)}>查看完整建议</Button>}
       </Space>
     </Card>
   }

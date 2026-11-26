@@ -8,9 +8,11 @@ from fastapi.testclient import TestClient
 
 from backend import store, workflow
 from backend.agent import Draft, Variant, validate_links, validate_variant
+from backend.chat_agent import ChatTools, run_chat
 from backend.cleaning_agent import CleaningReview, review_import
 from backend.data import read_file
 from backend.main import app
+from backend.learning_chat import ChatRequest
 from backend.model_transport import ModelRequestError
 from backend.recommendation_review import FinalReview, final_review
 from backend.snapshots import run_data_cleaning, table_data
@@ -447,6 +449,75 @@ class WorkflowTests(TestCase):
             with store.db() as conn:
                 store.put(conn, "job", item["id"], {**item, "state": "done"})
             self.assertTrue(self.client.put(endpoint, json=edit).json()["approved"])
+
+    def test_agent_approval_and_export_require_current_versions(self):
+        batch = self.post_import()
+        self.run_cleaning(batch["run_id"])
+        sid = self.confirm(batch).json()["snapshot_id"]
+        draft = {"id": "draft", "student": "D01", "group": "", "node": "", "revision": 1,
+                 "snapshot_id": sid, "message": "复习去括号", "exercises": [], "approved": False,
+                 "review_state": "pass", "review_run_id": "review",
+                 "final_review": {"decision": "pass", "input_version": 1}, "material_ids": []}
+        with store.db() as conn:
+            store.put(conn, "draft", "draft", draft)
+            store.put(conn, "job", "review", {"id": "review", "state": "done"})
+            snapshot = store.get(conn, "snapshot", sid)
+        tools = ChatTools(ChatRequest(question="确认 D01 的建议"), snapshot)
+        self.assertEqual(tools.resolve_scope()["status"], "ok")
+        self.assertEqual(tools.propose_approve_draft("draft")["status"], "not_ready")
+        tools.read_drafts()
+        self.assertEqual(tools.propose_approve_draft("draft")["status"], "waiting")
+        proposal = tools.cards[-1]
+        with store.db() as conn:
+            store.put(conn, "draft", "draft", {**draft, "message": "已经修改"})
+        path = '/api/chat/proposals/' + proposal['id'] + '/confirm'
+        self.assertEqual(self.client.post(path).status_code, 409)
+        with store.db() as conn:
+            store.put(conn, "draft", "draft", draft)
+        result = self.client.post(path)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertTrue(result.json()["result"]["approved"])
+        self.assertEqual(self.client.post(path).json()["result"], result.json()["result"])
+        export = ChatTools(ChatRequest(question="下载正式成果"), snapshot)
+        self.assertEqual(export.prepare_formal_export()["count"], 1)
+        self.assertEqual(self.client.get('/api/export', params={'formal': 'true', 'expected_snapshot': 'old'}).status_code, 409)
+        self.assertEqual(self.client.get('/api/export', params={'formal': 'true', 'expected_snapshot': sid}).status_code, 200)
+
+    def test_chat_retries_empty_model_response_before_tools(self):
+        answer = {"role": "assistant", "content": '{"answer":"请先导入数据。","quotes":[]}'}
+        with patch('backend.chat_agent.complete_with_tools', side_effect=[ModelRequestError('response'), answer]) as call:
+            run_chat(ChatRequest(question="你好"), None, 'opencode')
+        self.assertEqual(call.call_count, 2)
+
+    def test_chat_retries_unparseable_final_answer(self):
+        bad = {"role": "assistant", "content": '非 JSON 输出'}
+        good = {"role": "assistant", "content": '{"answer":"请先导入数据。","quotes":[]}'}
+        with patch('backend.chat_agent.complete_with_tools', side_effect=[bad, good]) as call:
+            result = run_chat(ChatRequest(question="你好"), None, 'opencode')
+        self.assertEqual(result['answer'], '请先导入数据。')
+        self.assertEqual(call.call_count, 2)
+
+    def test_agent_stop_and_resume_task_require_confirmation(self):
+        job = {"id": "task", "kind": "clean", "state": "queued", "created": 1, "payload": {}}
+        with store.db() as conn:
+            store.put(conn, "job", job["id"], job)
+        tools = ChatTools(ChatRequest(question="停止这个任务"), None)
+        self.assertEqual(tools.propose_stop_job('task')['status'], 'missing')
+        tools.read_jobs()
+        self.assertEqual(tools.propose_stop_job('task')['status'], 'waiting')
+        proposal = tools.cards[-1]
+        with store.db() as conn:
+            self.assertEqual(store.get(conn, 'job', 'task')['state'], 'queued')
+        response = self.client.post('/api/chat/proposals/' + proposal['id'] + '/confirm')
+        self.assertEqual(response.status_code, 200, response.text)
+        with store.db() as conn:
+            self.assertEqual(store.get(conn, 'job', 'task')['state'], 'stopped')
+        retry = ChatTools(ChatRequest(question="重试这个任务"), None)
+        retry.read_jobs()
+        self.assertEqual(retry.propose_retry('task')['status'], 'waiting')
+        response = self.client.post('/api/chat/proposals/' + retry.cards[-1]['id'] + '/confirm')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['result']['run_id'], 'task')
 
     def test_final_review_rejects_fabricated_reference(self):
         draft = {"revision": 1, "observation": "", "uncertainty": "", "evidence": [], "citations": [],

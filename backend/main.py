@@ -342,6 +342,21 @@ def confirm_proposal(key: str):
             proposal.update(status="confirmed", result=result, confirmed_at=time.time())
             put(conn, "proposal", key, proposal)
             return {"proposal": proposal_card(proposal), "result": result}
+        if proposal["kind"] == "approve_draft":
+            active = current_snapshot(conn)
+            draft = require(conn, "draft", payload["draft_id"])
+            if not active or active["id"] != payload["snapshot_id"] or material_version(draft) != payload["version"]:
+                raise HTTPException(409, "数据快照或建议版本已变化，请重新核对。")
+            review = draft.get("final_review") or {}
+            if review.get("decision") != "pass" or review.get("input_version") != draft["revision"]:
+                raise HTTPException(409, "当前建议版本尚未通过终审")
+            saved = edit_draft(conn, draft["id"], Edit(revision=payload["revision"], approved=True,
+                message=draft.get("message", draft.get("follow_up", "")),
+                exercises=[item["question_id"] for item in draft["exercises"]]))
+            result = {"draft_id": saved["id"], "revision": saved["revision"], "approved": saved["approved"]}
+            proposal.update(status="confirmed", result=result, confirmed_at=time.time())
+            put(conn, "proposal", key, proposal)
+            return {"proposal": proposal_card(proposal), "result": result}
         if proposal["kind"] == "publish_material":
             doc = require(conn, "material", payload["material_id"])
             if material_version(doc) != payload["version"]:
@@ -352,6 +367,14 @@ def confirm_proposal(key: str):
             if material_version(item) != payload["version"]:
                 raise HTTPException(409, "任务状态已变化，请重新查询后发起重试。")
             run = retry_run(conn, item)
+        elif proposal["kind"] == "stop_job":
+            item = require(conn, "job", payload["run_id"])
+            if item["state"] != payload["state"] or item["kind"] != payload["kind"]:
+                raise HTTPException(409, "任务状态已变化，请重新查询。")
+            result = manage_job_in(conn, item, "stop")
+            proposal.update(status="confirmed", result=result, confirmed_at=time.time())
+            put(conn, "proposal", key, proposal)
+            return {"proposal": proposal_card(proposal), "result": result}
         elif proposal["kind"] in {"revise_material", "revise_draft", "correct_attempt"}:
             result = confirm_chat_revision(conn, proposal["kind"], payload)
             proposal.update(status="confirmed", result=result, confirmed_at=time.time())
@@ -581,19 +604,24 @@ def manage_job(key: str, action: str):
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         item = require(conn, "job", key)
-        if action == "stop" and item["kind"] not in {"clean", "generate", "recommendation_review"} and item["state"] == "running":
-            raise HTTPException(409, "当前任务不支持阶段停止")
-        if action == "stop" and item["state"] == "running":
-            put(conn, "job_stop", key, {"requested": True})
-            return {"state": "running", "stop_requested": True}
-        if action == "stop" and item["state"] == "queued":
-            item["state"] = "stopped"
-        elif action in {"archive", "unarchive"} and item["state"] in {"done", "failed", "stopped"}:
-            item["archived"] = action == "archive"
-        else:
-            raise HTTPException(409, "当前任务状态不支持此操作")
-        put(conn, "job", key, item)
-        return item
+        return manage_job_in(conn, item, action)
+
+
+def manage_job_in(conn, item, action):
+    key = item["id"]
+    if action == "stop" and item["kind"] not in {"clean", "generate", "recommendation_review"} and item["state"] == "running":
+        raise HTTPException(409, "当前任务不支持阶段停止")
+    if action == "stop" and item["state"] == "running":
+        put(conn, "job_stop", key, {"requested": True})
+        return {"state": "running", "stop_requested": True}
+    if action == "stop" and item["state"] == "queued":
+        item["state"] = "stopped"
+    elif action in {"archive", "unarchive"} and item["state"] in {"done", "failed", "stopped"}:
+        item["archived"] = action == "archive"
+    else:
+        raise HTTPException(409, "当前任务状态不支持此操作")
+    put(conn, "job", key, item)
+    return item
 
 
 @app.post("/api/jobs/{key}/retry")
@@ -1439,10 +1467,12 @@ def deliveries():
 
 
 @app.get("/api/export")
-def export_data(format: str = "json", formal: bool = False):
+def export_data(format: str = "json", formal: bool = False, expected_snapshot: str = ""):
     with db() as conn:
         snapshot = current_snapshot(conn)
         snapshot_id = snapshot["id"] if snapshot else None
+        if expected_snapshot and expected_snapshot != snapshot_id:
+            raise HTTPException(409, "数据快照已变化，请重新准备导出")
         data = table_data(snapshot)
         people = data["模拟学生"]
         groups = sorted({r["模拟班级编号"] for r in people.values()})

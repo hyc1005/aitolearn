@@ -14,6 +14,23 @@ def ocr_executable():
     return Path(os.getenv("OCR_PYTHON") or ".venv-ocr/Scripts/python.exe").expanduser().resolve()
 
 
+def page_render_scale(page):
+    """Avoid upscaling a full-page scan beyond its original pixel density."""
+    width, height = page.get_size()
+    for image in page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_IMAGE]):
+        left, bottom, right, top = image.get_bounds()
+        image_width, image_height = right - left, top - bottom
+        if width > 0 and height > 0 and image_width > 0 and image_height > 0 and (
+                image_width * image_height >= width * height * .8):
+            try:
+                pixels_width, pixels_height = image.get_px_size()
+            except (pdfium.PdfiumError, ValueError, TypeError):
+                return 1.6
+            native_scale = min(pixels_width / image_width, pixels_height / image_height)
+            return max(1.0, min(1.6, native_scale))
+    return 1.6
+
+
 def process(document, metrics=None):
     if metrics is None:
         metrics = {}
@@ -36,18 +53,32 @@ def process(document, metrics=None):
         if not executable.is_file():
             raise RuntimeError(f"{locator} 需要 OCR，但本机未配置 PaddleOCR。请先安装 OCR 环境，或上传含文字层的 PDF。")
         corrected = directory / f"{image.stem}-corrected.png"
-        completed = subprocess.run([executable, "-m", "ocr_worker", str(image), str(corrected)], capture_output=True,
-                                   encoding="utf-8", errors="replace", timeout=300,
-                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        # A retry must never attach coordinates to a corrected image from an older run.
+        corrected.unlink(missing_ok=True)
+        try:
+            completed = subprocess.run([executable, "-m", "ocr_worker", str(image), str(corrected)], capture_output=True,
+                                       encoding="utf-8", errors="replace", timeout=600,
+                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"{locator} OCR 处理超时，请检查图片大小或本机资源后重试") from None
+        except OSError:
+            raise RuntimeError("OCR 环境无法启动，请运行 doctor.ps1 检查 Python 和 PaddleOCR") from None
         if completed.returncode:
             raise RuntimeError("OCR 处理失败，请运行 doctor.ps1 检查 PaddleOCR 和模型缓存")
-        result = json.loads(completed.stdout)
+        try:
+            result = json.loads(completed.stdout)
+            regions = result["blocks"]
+            if not isinstance(regions, list) or any(not isinstance(region, dict) or not isinstance(region.get("text"), str)
+                                                    for region in regions):
+                raise ValueError
+        except (ValueError, TypeError, KeyError):
+            raise RuntimeError("OCR 返回结果格式无效，请检查 OCR 环境后重试") from None
         if corrected.exists():
             locator += " · 矫正图"
             previews[locator] = str(corrected)
         metrics["ocr_engine"] = "PaddleOCR"
         metrics["ocr_units"] += 1
-        for region in result["blocks"]:
+        for region in regions:
             add(region["text"], locator, region.get("bbox") if corrected.exists() else None)
 
     if suffix == ".doc":
@@ -62,12 +93,6 @@ def process(document, metrics=None):
                 try:
                     locator = f"PDF 第 {index + 1} 页"
                     image = directory / f"{index + 1}.jpg"
-                    bitmap = page.render(scale=1.6)
-                    try:
-                        bitmap.to_pil().convert("RGB").save(image)
-                    finally:
-                        bitmap.close()
-                    previews[locator] = str(image)
                     text_page = page.get_textpage()
                     try:
                         text = text_page.get_text_bounded()
@@ -75,7 +100,14 @@ def process(document, metrics=None):
                         text_page.close()
                     compact = re.sub(r"\s", "", text)
                     has_image = any(page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_IMAGE]))
-                    if "\ufffd" not in text and (len(compact) >= 35 or (compact and not has_image)):
+                    text_usable = "\ufffd" not in text and (len(compact) >= 35 or (compact and not has_image))
+                    bitmap = page.render(scale=1.6 if text_usable else page_render_scale(page))
+                    try:
+                        bitmap.to_pil().convert("RGB").save(image)
+                    finally:
+                        bitmap.close()
+                    previews[locator] = str(image)
+                    if text_usable:
                         for paragraph in re.split(r"\n\s*\n", text):
                             add(paragraph, locator)
                         metrics["text_pages"] += 1

@@ -41,6 +41,19 @@ class PersistentQueriesTest(TestCase):
     def setUp(self):
         self.enterContext(patch.object(store, 'ROOT', Path(self.enterContext(tempfile.TemporaryDirectory()))))
 
+    def test_progress_does_not_cite_unrelated_material_matching_generic_words(self):
+        snap = example('active', 1)
+        with store.db() as conn:
+            store.put(conn, 'snapshot', snap['id'], snap)
+            store.put(conn, 'import', 'batch', {'confirmed': True, 'snapshot_id': snap['id']})
+            store.put(conn, 'settings', 'active_snapshot', {'id': snap['id'], 'review_run_id': 'test-review'})
+            store.put(conn, 'material', 'unrelated', material('unrelated', 'published', '教材介绍三角形的面积。'))
+        with patch.dict('os.environ', {'APP_KEYWORD_ONLY': '1'}), TestClient(app) as client:
+            response = client.post('/api/learning-chat', json={'question': 'D01 去括号有进步吗？教材怎么讲？'})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['parts'], [])
+            self.assertIn('暂无匹配的已发布资料', response.json()['answer'])
+
     def test_backfill_parity_revision_dedup_and_keyword_independent_progress(self):
         old, active = example('old', 0), example('new', 1)
         with store.db() as conn:

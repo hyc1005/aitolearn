@@ -56,15 +56,19 @@ def structured_review(schema, instruction, facts, session, *, max_tokens=None):
 
 
 def validated_review(schema, instruction, facts, session, valid):
+    retry_tokens = None
     for attempt in range(2):
         try:
-            result, model = structured_review(schema, instruction, facts, f"{session}-{attempt}")
+            options = {"max_tokens": retry_tokens} if retry_tokens else {}
+            result, model = structured_review(schema, instruction, facts, f"{session}-{attempt}", **options)
             if not valid(result):
                 raise ModelRequestError("reference", "引用不在本次允许列表，或必要的核对事项为空")
             return result, model
         except ModelRequestError as error:
-            if attempt or error.code not in {"json", "schema", "reference"}:
+            if attempt or error.code not in {"json", "schema", "reference", "truncated", "empty"}:
                 raise
+            if error.code == "truncated":
+                retry_tokens = 6000
             instruction += f" 上次输出需要修正：{error}。检查 JSON 字段及允许的引用编号。"
 
 

@@ -36,8 +36,14 @@ def dated_nodes(conn, sid, question):
     return nodes
 
 
-def citations(conn, query):
-    hits = search(conn, query, limit=3)
+def citations(conn, query, label):
+    # General words such as “教材” must not make an unrelated passage look like
+    # evidence for a specific skill. Prefer the skill terms the teacher named.
+    terms = [term for term in re.split(r'[,、，；。\s]|并', label) if len(term) >= 2]
+    named = [term for term in terms if term in query]
+    required = named or terms
+    hits = search(conn, ' '.join(required) if required else label, limit=20)
+    hits = [item for item in hits if any(term in item['text'] for term in required)][:3]
     return [{'quote': item['text'][:380], 'source': {'kind': 'material', 'title': item['title'],
              'locator': item['locator'], 'citation': item}} for item in hits]
 
@@ -105,7 +111,7 @@ def answer_progress(conn, snapshot, request):
         trace.append({'tool': 'read_progress', 'status': 'ok', 'student': student, 'snapshot_id': sid,
                       'indicator': skill, 'count': sum(item['count'] for item, _ in attempts)})
     if asks_teaching:
-        parts = citations(conn, request.question + ' ' + label)
+        parts = citations(conn, request.question, label)
         trace.append({'tool': 'search_materials', 'status': 'ok', 'count': len(parts)})
         lines.append('教学资料：以下是已发布资料中与该技能相关的原文。' if parts else '教学资料：暂无匹配的已发布资料。')
     return {'answer': '\n'.join(lines), 'cards': cards, 'parts': parts, 'trace': trace}
