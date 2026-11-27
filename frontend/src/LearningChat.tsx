@@ -64,6 +64,10 @@ type Onboarding = {
   snapshot_id?: string; model_configured: boolean
 }
 type Props = {
+  courseId: string
+  setCourseId: (value: string) => void
+  courseStudentId: string
+  setCourseStudentId: (value: string) => void
   snapshot?: string
   pendingRun?: string
   openAdvice: (target: Pick<Context, 'student' | 'group' | 'node'>) => void
@@ -87,6 +91,7 @@ type Props = {
 
 const SESSION_KEY = 'aitolearn.chat.session'
 const TOOL_LABELS: Record<string, string> = {
+  read_course_records:'读取课程学生记录',
   resolve_scope:'解析查询对象', read_profile:'读取指标和覆盖人数', read_evidence:'读取原始作答',
   search_materials:'检索资料', read_exercises:'查找练习', read_follow_ups:'读取练后回看',
   read_distribution:'读取班级分布', read_attachments:'读取附件', read_cleaning:'查看清洗进度',
@@ -192,6 +197,17 @@ function TurnProcess({ turn, children }: { turn: Turn; children?: React.ReactNod
 export function LearningChat(props: Props) {
   const { api, students, groups, nodes, access } = props
   const [context, setContext] = useState<Context>({ student: '', group: '', node: '' })
+  const [courses, setCourses] = useState<{id: string; name: string}[]>([])
+  const [courseStudents, setCourseStudents] = useState<{id: string; name: string; external_id: string; class_name: string}[]>([])
+  useEffect(() => { if (props.active) void api<any[]>('/course-data/courses').then(setCourses).catch(() => setCourses([])) }, [props.active])
+  useEffect(() => {
+    if (!props.courseId) { setCourseStudents([]); return }
+    let current = true
+    void api<any>('/course-data/courses/' + encodeURIComponent(props.courseId) + '/profile').then(result => {
+      if (current) setCourseStudents(result.students)
+    }).catch(() => { if (current) setCourseStudents([]) })
+    return () => { current = false }
+  }, [props.courseId])
   const [draft, setDraft] = useState('')
   const [turns, setTurns] = useState<Turn[]>([])
   const [activeTurn, setActiveTurn] = useState(0)
@@ -274,6 +290,8 @@ export function LearningChat(props: Props) {
       setLegacyProvider(session.provider)
       setChoiceError('')
       setContext({ ...{ student: '', group: '', node: '' }, ...(session.context || {}) })
+      props.setCourseId(session.context?.course_id || '')
+      props.setCourseStudentId(session.context?.course_student_id || '')
       setTurns((session.turns || []).map((turn: any) => ({
         question: turn.question,
         context: turn.context,
@@ -397,7 +415,7 @@ export function LearningChat(props: Props) {
 
   async function send(question: string, override?: Partial<Context>, history = turns, refs = attachments) {
     question = question.trim()
-    if (!question || busy || restoring || savingChoice || stale) return
+    if (!question || busy || restoring || savingChoice || (stale && !props.courseId)) return
     const outgoing: Context = { ...context, ...override }
     followLatest.current = true
     setBusy(true)
@@ -408,6 +426,8 @@ export function LearningChat(props: Props) {
     try {
       const result = await streamChat({
           question,
+          course_id: props.courseId,
+          course_student_id: props.courseStudentId,
           attachments: refs,
           session_id: sessionId,
           ...(preferred || {}),
@@ -585,6 +605,8 @@ export function LearningChat(props: Props) {
   return <section aria-label="学情对话" className={turns.length ? "learning-chat" : "learning-chat chat-is-empty"}>
     <header className="chat-toolbar">
       <h1 className="chat-title" title={title}>{title}</h1>
+      <Space wrap><Select aria-label="对话选择课程" placeholder="选择课程数据" allowClear disabled={busy} value={props.courseId || undefined} style={{width:160}} options={courses.map(c => ({value:c.id,label:c.name}))} onChange={value => {props.setCourseId(value || ''); props.setCourseStudentId('')}} />
+        {props.courseId && <Select aria-label="对话选择课程学生" placeholder="选择学生" allowClear disabled={busy} value={props.courseStudentId || undefined} style={{width:200}} options={courseStudents.map(s => ({value:s.id,label:[s.class_name,s.name,s.external_id].filter(Boolean).join(' · ')}))} onChange={value => props.setCourseStudentId(value || '')} />}</Space>
       <Space size={4} className="chat-toolbar-actions">
         {historyMobile ? <>
           <Tooltip title="最近对话"><Button type="text" icon={<HistoryOutlined />} disabled={historyDisabled} aria-label="最近对话" aria-haspopup="dialog" onClick={() => void showHistory(true)} /></Tooltip>
@@ -603,7 +625,7 @@ export function LearningChat(props: Props) {
       <h2>今天想了解什么？</h2>
       <p>查看学生和班级表现，沿着原始作答与教材依据继续追问。</p>
     </div>}
-    {!restoring && !turns.length && (!props.snapshot || !!props.pendingRun) && <section className="chat-start" aria-label="学情数据状态">
+    {!restoring && !turns.length && !props.courseId && (!props.snapshot || !!props.pendingRun) && <section className="chat-start" aria-label="学情数据状态">
       <div className="chat-status-icon" aria-hidden="true"><FileSearchOutlined /></div>
       <div className="chat-start-copy">
         <h2>{props.pendingRun ? '本批数据待教师确认' : '还没有可用的学情数据'}</h2>
@@ -719,7 +741,7 @@ export function LearningChat(props: Props) {
             options={efforts.map(id => ({ id, label: effortLabel[id] || id }))}
             change={effort => { if (selected) void choose({ connection_id: selected.connection.id, model_id: selected.id, effort }) }} />
           <Button className="chat-send" type="primary" shape="circle" htmlType="submit" aria-label="发送" title="发送"
-            loading={busy} icon={<ArrowUpOutlined />} disabled={restoring || savingChoice || stale || !draft.trim()} />
+            loading={busy} icon={<ArrowUpOutlined />} disabled={restoring || savingChoice || (stale && !props.courseId) || !draft.trim()} />
         </div>
       </div>
     </form></div>

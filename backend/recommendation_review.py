@@ -62,7 +62,7 @@ def interpret(tables, payload, session):
                            "status": axis["status"], "sample_ids": candidates[key]}
                       for key, axis in axes.items()}, "samples": samples, "anchor_event": anchor}
     instruction = (
-        "解读数学学情。不要逐项复述数据，summary 控制在 150 字以内，最多三条结论，每条 detail 不超过 100 字。indicator_id 必须是 axes 的键。"
+        "解读学情。不要逐项复述数据，summary 控制在 150 字以内，最多三条结论，每条 detail 不超过 100 字。indicator_id 必须是 axes 的键。"
         "evidence_ids 必须逐字复制该指标 sample_ids 内的事件编号，不能填写题号。"
         "有有效作答时使用作答支持判断，样本不足只提出观察。单次失误不得推广为稳定困难。"
         "anchor_event 非空时至少一条结论引用该作答事件。无证据时 claims 留空，summary 说明需要补充什么。"

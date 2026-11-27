@@ -284,6 +284,9 @@ def save_session(conn, session_id, request, result):
             context = {"student": payload.get("student", ""), "group": payload.get("group", ""),
                        "node": payload.get("node", "")}
     context["snapshot_id"] = result.get("snapshot_id", "")
+    if getattr(request, 'course_id', ''):
+        context['course_id'] = request.course_id
+        context['course_student_id'] = request.course_student_id
     turn = {"question": request.question, "answer": result.get("answer", ""), "parts": result.get("parts", []),
             "trace": result.get("trace", []), "mode": result.get("mode"), "context": context,
             "cards": result.get("cards", []), "snapshot_id": result.get("snapshot_id", ""),

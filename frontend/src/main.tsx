@@ -1,4 +1,6 @@
 import { FollowUpEditor, StudentFollowUps } from './FollowUp'
+import { CourseImport } from './CourseImport'
+import { CourseProfile } from './CourseProfile'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App, Alert, Button, Card, ConfigProvider, Drawer, Empty, Input, Layout, Select, Skeleton, Space, Steps, Table, Tag, Tooltip, Typography, theme } from 'antd'
@@ -135,6 +137,8 @@ function SourcePage({ citation }: { citation: Row }) {
 function Workbench() {
   const { message } = App.useApp()
   const [page, setPage] = useState<string>(pageFromHash)
+  const [courseId, setCourseId] = useState('')
+  const [courseStudentId, setCourseStudentId] = useState('')
   const [mobile, setMobile] = useState(() => window.matchMedia(mobileSidebarQuery).matches)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [chatFocus, setChatFocus] = useState(false)
@@ -482,6 +486,7 @@ function Workbench() {
         launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
       <div className="chat-page" hidden={page !== 'chat'}>
         <LearningChat active={page === 'chat'} snapshot={activeSnapshot} focusChanged={setChatFocus}
+          courseId={courseId} setCourseId={setCourseId} courseStudentId={courseStudentId} setCourseStudentId={setCourseStudentId}
           pendingRun={latestClean?.stage === 'confirm' && latestClean.state === 'done' ? latestClean.id : undefined}
           openAdvice={target => setNewAdvice(target)}
           students={(data.snapshot_id === activeSnapshot ? students : []) as Parameters<typeof LearningChat>[0]['students']}
@@ -510,6 +515,7 @@ function Workbench() {
         rebase={() => perform(async () => { openRun((await api('/imports/' + runDetail?.payload.batch_id + '/rebase', post)).run_id) })}
         confirm={() => { if (runDetail) void confirmClean(runDetail) }} />}
       {page === 'import' && <>
+        <CourseImport />
         <Card title="当前步骤" extra={latestClean && <Button onClick={() => openRun(latestClean.id)}>查看任务详情</Button>}>
           <Steps current={latestClean?.state === 'failed' ? 1 : cleanDetail?.stage === 'confirm' && cleanDetail.state === 'done' ? 2 :
             report?.snapshot_id ? 3 : latestClean ? 1 : 0} items={[
@@ -615,6 +621,7 @@ function Workbench() {
           <Button onClick={() => goTo('chat')}>回到学情对话</Button><Text type="secondary">课程与资料可以跳过，之后随时补充和发布。</Text></Space></Card>
       </>}
       {page === 'student' && <>
+        <CourseProfile api={api} course={courseId} setCourse={setCourseId} student={courseStudentId} setStudent={setCourseStudentId} />
         <Card className="student-profile-card" title={target ? (student ? '学生 ' : '班级 ') + target.id : '学习表现'}
           extra={<Space wrap><Select aria-label="选择画像对象" placeholder="搜索学生或班级" className="profile-target" allowClear
             showSearch={{ optionFilterProp: 'label' }} value={target && target.kind + ':' + target.id} options={profileChoices}

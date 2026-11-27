@@ -88,7 +88,7 @@ def review_import(snapshot, previous, session):
              if previous else None}
     review, model = validated_review(
         CleaningReview,
-        "复核七年级数学清洗结果。counts 中 pending 是待评分、unanswered 是未作答，均是正常状态而非自动判为异常；"
+        "复核学情数据清洗结果。counts 中 pending 是待评分、unanswered 是未作答，均是正常状态而非自动判为异常；"
         "valid_scored 只统计有效已评分作答，不能要求它与全部作答相等。"
         "summary 说明异常会影响哪些判断。findings 指出教师需要核对的事项，"
         "引用 allowed_refs。已隔离异常可以 ready，只有整体数据需要修订时选 needs_revision 并给出依据。",

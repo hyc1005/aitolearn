@@ -33,6 +33,8 @@ from .conversation import (CORRECTION_FIELDS, cleaning_card, deterministic, late
 from .data import REQUIRED, import_headers, profile, read_file, student_scores
 from .diagnosis import overview as diagnosis_overview, zero_evidence
 from .follow_up import router as follow_up_router
+from .course_data import router as course_data_router, migrate_comments
+from .course_advice import router as course_advice_router
 from .learning_chat import ChatRequest, ChatTurn, collect_sources, reply
 from .learning_progress import answer_progress
 from .model_connections import migrate as migrate_connections, router as model_router, selection as chat_selection
@@ -46,6 +48,7 @@ from . import student_query
 
 @asynccontextmanager
 async def lifespan(app):
+    await run_in_threadpool(migrate_comments)
     await run_in_threadpool(student_query.backfill, db)
     await run_in_threadpool(backfill_index, db)
     with db() as conn:
@@ -57,6 +60,8 @@ async def lifespan(app):
 
 app = FastAPI(title="智慧学伴", lifespan=lifespan)
 app.include_router(follow_up_router)
+app.include_router(course_data_router)
+app.include_router(course_advice_router)
 app.include_router(model_router)
 
 
@@ -148,6 +153,37 @@ def learning_chat(request: ChatRequest):
     started = time.monotonic()
     if not request.question.strip() or any(isinstance(turn, str) and len(turn) > 1200 for turn in request.history):
         raise HTTPException(422, "请输入问题，单条最多 1200 字")
+    if request.course_id:
+        from .course_data import course_chat_answer
+        from .course_agent import run_course_agent
+        import re
+        answer, count = course_chat_answer(request.course_id, request.course_student_id, request.question)
+        ambiguous = '问题中的学生与当前选择不一致' in answer
+        with db() as conn:
+            session = get(conn, 'chat_session', request.session_id) if request.session_id else None
+            selected = chat_selection(conn, request, session)
+            provider = selected or active_provider(conn)
+        result = None
+        if not ambiguous and request.use_tools and (selected or (not request.use_configured_models and provider_key(provider))):
+            try:
+                result = run_course_agent(request, provider)
+            except ToolsUnavailable:
+                pass
+            except ValueError as error:
+                raise HTTPException(502, str(error)) from None
+        if result is None:
+            if re.search(r'建议|分析|原因|为什么|如何|怎么办', request.question) and not ambiguous:
+                answer = '课程记录分析需要可用的工具调用模型，请在设置中配置并测试模型。'
+                count = 0
+            result = {'answer': answer, 'parts': [], 'cards': [],
+                      'trace': [{'tool': 'read_course_records', 'status': 'ok', 'count': count}] if count else [],
+                      'mode': 'course_data', 'snapshot_id': ''}
+        if selected:
+            result['selection'] = selected.metadata()
+        with db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            saved = save_session(conn, request.session_id, request, result)
+            return {**result, 'session_id': saved['id'], 'context': saved['context'], 'title': session_summary(saved)['title']}
     with db() as conn:
         session = get(conn, "chat_session", request.session_id) if request.session_id else None
         if session and not request.history:

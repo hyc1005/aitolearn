@@ -26,6 +26,8 @@ class Attachment(BaseModel):
 class ChatRequest(BaseModel):
     attachments: list[Attachment] = Field(default_factory=list, max_length=3)
     question: str = Field(min_length=1, max_length=1200)
+    course_id: str = Field(default='', max_length=128)
+    course_student_id: str = Field(default='', max_length=128)
     history: list[ChatTurn | str] = Field(default_factory=list, max_length=5)
     snapshot_id: str = Field(default="", max_length=128)
     student: str = Field(default="", max_length=128)

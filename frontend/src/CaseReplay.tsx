@@ -126,7 +126,7 @@ export function CaseReplay({ data, openCitation }: { data: CaseData; openCitatio
         {citations(alternate.citations)}
       </> : <>
         {index === 0 && (answer ? <div className="course-stage">
-          <span className="small-label">{data.indicator?.主题 || '七年级数学'} · {data.indicator?.课标整理编号}</span>
+          <span className="small-label">{data.indicator?.主题 || '课程'} · {data.indicator?.课标整理编号}</span>
           <h2>{data.indicator?.观察指标 || '课程指标'}</h2>
           <div className="course-question">{answer.题目.题干或内容}</div>
           <p className="preserve">{answer.题目.评分点}</p>{citations(before?.citations)}
