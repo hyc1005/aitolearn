@@ -36,7 +36,16 @@ async function check(browser, width) {
     const answer = sent === 2 ? response : Array(12).fill(response).join('\n\n')
     const result = { answer, context:scope, elapsed_ms:1800, model_call:selection,
       parts:[{quote:'通分后再进行计算。', source:{kind:'material', title:citation.title, locator:citation.locator, citation}}],
-      trace:[{tool:'search_materials', status:'ok', count:1}], cards:[] }
+      trace:[{tool:'search_materials', status:'ok', count:1}], cards:sent === 2 ? [{
+        kind:'profile', target:{kind:'student',id:'示例01'}, indicators:[0,25,50,75,100,null].map((score, i) => ({
+          id:'axis'+i, label:'指标'+i, score, earned:score === 100 ? 10 : 0, possible:10,
+          n:1, coverage:1, population:1, status:'暂无评分'
+        }))
+      }, {
+        kind:'profile', target:{kind:'group',id:'示例班'}, indicators:[0,50,100,null].map((score, i) => ({
+          id:'group'+i, label:'班级指标'+i, score, n:2, coverage:2, population:10, status:'暂无评分'
+        }))
+      }] : [] }
     return route.fulfill({contentType:'text/event-stream',body:'data: '+JSON.stringify({type:'complete',result})+'\n\n'})
   })
   try {
@@ -73,14 +82,40 @@ async function check(browser, width) {
     await send.click()
     await page.getByRole('alert').filter({hasText:'模拟服务暂不可用'}).waitFor()
     await page.getByRole('button',{name:/^重\s*试$/}).click()
-    await page.getByText(response).waitFor()
+    await page.getByText('本次测验建议优先复习分数运算。先核对通分，再验证约分。').waitFor()
+    const dots = page.locator('.chat-card').filter({hasText:'学生 示例01'}).locator('.chat-indicator-dot')
+    assert.deepEqual(await dots.evaluateAll(els => els.map(el => getComputedStyle(el).backgroundColor)), [
+      'rgb(255, 0, 0)', 'rgb(255, 128, 0)', 'rgb(255, 255, 0)',
+      'rgb(156, 255, 40)', 'rgb(56, 255, 79)', await dots.nth(5).evaluate(el => getComputedStyle(el).backgroundColor)
+    ])
+    assert.equal(await page.locator('.chat-score-legend').count(), 0)
+    const groupDots = page.locator('.chat-card').filter({hasText:'班级 示例班'}).locator('.chat-indicator-dot')
+    assert.deepEqual((await groupDots.evaluateAll(els => els.map(el => getComputedStyle(el).backgroundColor))).slice(0,3),
+      ['rgb(255, 0, 0)', 'rgb(255, 255, 0)', 'rgb(56, 255, 79)'])
+    await page.getByText(/100% · 当前满分/).waitFor()
+    assert.equal(await page.getByText('暂无评分', {exact:true}).count(), 2)
+    if (await page.getByRole('button',{name:'展开导航'}).isVisible()) await page.getByRole('button',{name:'展开导航'}).click()
+    const nav = page.locator('.sidebar:visible')
+    await nav.getByText('智慧学伴').waitFor()
+    assert.equal(await nav.locator('.nav-item[aria-current="page"]').textContent(), '学情对话')
+    assert.equal(await nav.locator('.nav-item').count(), 8)
+    assert.ok(await nav.evaluate(el => el.clientHeight >= Math.min(window.innerHeight, 600)), 'sidebar should use the available viewport height')
+    await page.waitForFunction(() => {
+      const content = document.querySelector('.shell > .content').getBoundingClientRect()
+      return innerWidth <= 800 ? Math.abs(content.left) < 2 : Math.abs(content.left - 240) < 2
+    })
+    assert.equal(await page.locator('.nav-backdrop').count(), width <= 800 ? 1 : 0)
+    await screenshot(page, `navigation-open-${width}`)
+    await nav.getByRole('button',{name:'收起导航'}).click()
+    await page.getByRole('button',{name:'展开导航'}).waitFor()
+    await page.waitForFunction(() => Math.abs(document.querySelector('.shell > .content').getBoundingClientRect().left) < 2)
     const source = page.getByRole('button',{name:citation.title + ' · ' + citation.locator})
     await source.click()
     await page.getByRole('dialog').getByText(citation.text).waitFor()
     await page.locator('.ant-drawer-close:visible').click()
     await page.getByRole('dialog').waitFor({state:'hidden'})
     await page.waitForFunction(() => document.activeElement?.textContent?.includes('赛题题库与学习卡'))
-    await page.getByText('思考与执行过程 · 1 步',{exact:true}).click()
+    await page.getByText('执行工具 1 次',{exact:true}).click()
     await page.getByText(/检索资料 · 1 条 · 已完成/).waitFor()
     await screenshot(page, `after-answer-${width}`)
 
@@ -92,12 +127,12 @@ async function check(browser, width) {
     await page.getByText('正在回答',{exact:false}).first().waitFor()
     for (let i = 0; i < 100 && !release; i++) await new Promise(resolve => setTimeout(resolve, 10))
     assert.ok(release, 'follow-up request should be waiting')
-    await page.locator('.chat-thread').evaluate(el => { el.scrollTop = 0 })
+    await page.evaluate(() => window.scrollTo(0, 0))
     const jump = page.getByRole('button',{name:'回到最新消息'})
     await jump.waitFor()
     release()
     await page.locator('.chat-reply-text').nth(2).waitFor()
-    assert.ok(await page.locator('.chat-thread').evaluate(el => el.scrollTop < 10), 'new reply must not steal scroll position')
+    assert.ok(await page.evaluate(() => window.scrollY < 10), 'new reply must not steal scroll position')
     await jump.click()
     await jump.waitFor({ state:'hidden' })
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
@@ -122,7 +157,9 @@ async function check(browser, width) {
       return name === 'broken.pdf' ? route.fulfill({status:400,json:{detail:'模拟上传失败'}})
         : route.fulfill({json:{id:'material-' + uploaded.length}})
     })
-    await page.goto(url.replace(/#.*$/, '') + '#materials')
+    await page.getByRole('button',{name:'展开导航'}).click()
+    await page.locator('.sidebar:visible').getByRole('button',{name:'课程与资料'}).click()
+    await page.getByRole('heading',{name:'课程与资料'}).waitFor()
     const files = page.getByLabel('选择教材文件（可多选）')
     await files.setInputFiles(['first.pdf', 'broken.pdf', 'third.pdf'].map(name => ({ name, mimeType:'application/pdf', buffer:Buffer.from('%PDF-1.7') })))
     await page.getByText('2 份已提交解析，1 份未提交').waitFor()

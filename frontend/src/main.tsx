@@ -137,11 +137,13 @@ function Workbench() {
   const [page, setPage] = useState<string>(pageFromHash)
   const [mobile, setMobile] = useState(() => window.matchMedia(mobileSidebarQuery).matches)
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [chatFocus, setChatFocus] = useState(false)
   const [rail, setRail] = useState(() => {
     try { return localStorage.getItem(sidebarPreference) === 'true' }
     catch { return false }
   })
   const navToggle = useRef<HTMLButtonElement>(null)
+  const navClose = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     const media = window.matchMedia(mobileSidebarQuery)
     const resize = () => { setMobile(media.matches); setMobileOpen(false) }
@@ -427,33 +429,48 @@ function Workbench() {
     if (result.continuation_error) message.warning('未自动生成建议：' + result.continuation_error)
   })
   const navExpanded = mobile ? mobileOpen : !rail
-  const navAction = navExpanded ? '收起导航' : '展开导航'
   const toggleNav = () => {
     if (mobile) { setMobileOpen(!mobileOpen); return }
     setRail(!rail)
     try { localStorage.setItem(sidebarPreference, String(!rail)) } catch { /* The toggle still works for this visit. */ }
   }
-  return <Layout className="shell">
-    <Layout.Sider width={!mobile && rail ? 72 : 216} className={'sidebar' + (!mobile && rail ? ' sidebar-rail' : '')}>
+  const closeNav = () => {
+    if (mobile) setMobileOpen(false)
+    else { setRail(true); try { localStorage.setItem(sidebarPreference, 'true') } catch { /* Keep the current view usable. */ } }
+    requestAnimationFrame(() => navToggle.current?.focus())
+  }
+  const focused = page === 'chat' && chatFocus
+  const brandSymbol = <span className="brand-symbol" role="img" aria-label="智慧学伴"><svg aria-hidden="true" className="brand-mascot" viewBox="0 0 48 48" fill="none"><rect x="4" y="4" width="40" height="40" rx="13" fill="#b1aaf1"/><path d="M12 17c4-2.4 8-2.1 12 1 4-3.1 8-3.4 12-1v15c-4-2-8-1.8-12 1-4-2.8-8-3-12-1z" fill="#fff9e9" stroke="#38315e" strokeWidth="2" strokeLinejoin="round"/><path d="M24 18v15M17.5 23.5h.1m12.8 0h.1M20 27c2 2 6 2 8 0" stroke="#38315e" strokeWidth="2" strokeLinecap="round"/><path d="M34 9v5m-2.5-2.5h5" stroke="#ffe49d" strokeWidth="2" strokeLinecap="round"/></svg></span>
+  return <Layout className={(page === 'chat' ? 'shell shell-chat' : 'shell') + (focused ? ' focused-chat' : '') + (navExpanded ? ' nav-open' : ' nav-closed')}>
+    <button type="button" className="nav-open-button" ref={navToggle} aria-label="展开导航" aria-controls="workbench-navigation"
+      aria-expanded={navExpanded} onClick={() => { toggleNav(); requestAnimationFrame(() => navClose.current?.focus()) }}>
+      <NavIcon name="toggle" />
+    </button>
+    {mobile && navExpanded && <button className="nav-backdrop" aria-label="关闭导航遮罩" onClick={closeNav} />}
+    <aside className="sidebar" aria-label="工作台侧栏" aria-hidden={!navExpanded} inert={!navExpanded}
+      onKeyDown={event => {
+        if (event.key === 'Escape') { event.preventDefault(); closeNav() }
+        if (mobile && event.key === 'Tab') {
+          const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+          if (event.shiftKey && document.activeElement === buttons[0]) { event.preventDefault(); buttons.at(-1)?.focus() }
+          else if (!event.shiftKey && document.activeElement === buttons.at(-1)) { event.preventDefault(); buttons[0]?.focus() }
+        }
+      }}>
       <div className="brand">
-        <span className="brand-symbol" role="img" aria-label="智慧学伴"><svg aria-hidden="true" className="brand-mascot" viewBox="0 0 48 48" fill="none"><rect x="4" y="4" width="40" height="40" rx="13" fill="#b1aaf1"/><path d="M12 17c4-2.4 8-2.1 12 1 4-3.1 8-3.4 12-1v15c-4-2-8-1.8-12 1-4-2.8-8-3-12-1z" fill="#fff9e9" stroke="#38315e" strokeWidth="2" strokeLinejoin="round"/><path d="M24 18v15M17.5 23.5h.1m12.8 0h.1M20 27c2 2 6 2 8 0" stroke="#38315e" strokeWidth="2" strokeLinecap="round"/><path d="M34 9v5m-2.5-2.5h5" stroke="#ffe49d" strokeWidth="2" strokeLinecap="round"/></svg></span>
-        <div className="brand-name" aria-label="智慧学伴">智慧学伴</div>
-        <Tooltip title={navAction} placement={mobile ? 'bottom' : 'right'}>
-          <button type="button" className="nav-toggle" ref={navToggle} aria-label={navAction} aria-controls="workbench-navigation"
-            aria-expanded={navExpanded} onClick={toggleNav}><NavIcon name="toggle" flipped={!navExpanded} /></button>
-        </Tooltip>
+        {brandSymbol}
+        <div className="brand-name">智慧学伴</div>
+        <button type="button" className="nav-toggle" ref={navClose} aria-label="收起导航" onClick={closeNav}><NavIcon name="toggle" flipped /></button>
       </div>
-      <nav id="workbench-navigation" aria-label="工作台导航" hidden={mobile && !mobileOpen}>
-        {pages.map(([key, label]) => <Tooltip key={key} title={!mobile && rail ? label : undefined} placement="right">
-          <button type="button" className="nav-item" aria-current={page === key ? 'page' : undefined} aria-label={label} onClick={() => {
+      <nav id="workbench-navigation" aria-label="工作台导航">
+        {pages.map(([key, label]) =>
+          <button key={key} type="button" className="nav-item" aria-current={page === key || (page === 'run' && key === 'tasks') ? 'page' : undefined} aria-label={label} onClick={() => {
             goTo(key)
-            if (mobile) { setMobileOpen(false); navToggle.current?.focus() }
+            if (mobile) closeNav()
           }}>
             <NavIcon name={key === 'tasks' ? 'agent' : key} /><span>{label}</span>
-          </button>
-        </Tooltip>)}
+          </button>)}
       </nav>
-    </Layout.Sider>
+    </aside>
     <Layout.Content className="content">
       {page !== 'overview' && page !== 'chat' && <header className="page-head"><Title level={2}>{page === 'run' ? '任务详情' : pages.find(p => p[0] === page)?.[1]}</Title>
         {page === 'run' && <Button onClick={() => openRun('')}>返回任务中心</Button>}</header>}
@@ -464,7 +481,7 @@ function Workbench() {
         openGroup={(id, node, snapshot, indicator) => openProfile('group', id, node, snapshot, indicator)}
         launchGroup={({ group, node, snapshot_id }) => void launch({ group, node, snapshot_id })} />
       <div className="chat-page" hidden={page !== 'chat'}>
-        <LearningChat active={page === 'chat'} snapshot={activeSnapshot}
+        <LearningChat active={page === 'chat'} snapshot={activeSnapshot} focusChanged={setChatFocus}
           pendingRun={latestClean?.stage === 'confirm' && latestClean.state === 'done' ? latestClean.id : undefined}
           openAdvice={target => setNewAdvice(target)}
           students={(data.snapshot_id === activeSnapshot ? students : []) as Parameters<typeof LearningChat>[0]['students']}

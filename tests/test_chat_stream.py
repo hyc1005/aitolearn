@@ -16,6 +16,53 @@ from backend.models import ToolsUnavailable
 
 
 class ChatStreamTests(TestCase):
+    def test_mixed_evidence_and_material_question_is_not_reduced_to_material_lookup(self):
+        from backend.learning_chat import ChatRequest
+        from backend.learning_progress import answer_progress
+        request = ChatRequest(question='结合教材和原始作答，解释学生为什么需要复习同类项。', student='S01')
+        self.assertIsNone(answer_progress(None, {'id':'sample'}, request))
+
+    def test_four_tool_rounds_can_still_produce_final_answer(self):
+        from backend.chat_agent import run_chat
+        from backend.learning_chat import ChatRequest
+        calls = [{'role':'assistant', 'content':None, 'tool_calls':[{'id':str(i), 'function':{
+            'name':'read_attachments', 'arguments':'{}'}}]} for i in range(4)]
+        calls.append({'role':'assistant', 'content':'{"answer":"已完成","quotes":[]}'})
+        with patch('backend.chat_agent.complete_with_tools', side_effect=calls):
+            result = run_chat(ChatRequest(question='检查附件'), None, 'opencode')
+        self.assertEqual(result['answer'], '已完成')
+        self.assertEqual(len(result['trace']), 4)
+
+    def test_material_answer_is_not_replaced_by_missing_profile_message(self):
+        from backend.chat_agent import ChatTools, run_chat
+        from backend.learning_chat import ChatRequest
+        def search(tools, name, args):
+            tools.sources.append({'kind':'material', 'text':'合并同类项'})
+            return {'status':'ok'}
+        messages = [
+            {'role':'assistant', 'content':None, 'tool_calls':[{'id':'c1', 'function':{
+                'name':'search_materials', 'arguments':'{"query":"同类项"}'}}]},
+            {'role':'assistant', 'content':'{"answer":"合并系数","quotes":[]}'},
+        ]
+        with patch.object(ChatTools, 'run', search), patch('backend.chat_agent.complete_with_tools', side_effect=messages), \
+             patch('backend.chat_agent.validated_reply', return_value={'answer':'合并系数', 'parts':[{'quote':'合并同类项'}]}):
+            result = run_chat(ChatRequest(question='查看教材怎么讲', student='S01'), None, 'opencode')
+        self.assertEqual(result['answer'], '合并系数')
+
+    def test_placeholder_clarification_does_not_interrupt_answer(self):
+        from backend.chat_agent import run_chat
+        from backend.learning_chat import ChatRequest
+        messages = [
+            {'role':'assistant', 'content':None, 'tool_calls':[{'id':'c1', 'function':{
+                'name':'ask_clarification', 'arguments':'{"question":"占位","options":"无"}'}}]},
+            {'role':'assistant', 'content':'{"answer":"已有足够信息","quotes":[]}'},
+        ]
+        with patch('backend.chat_agent.complete_with_tools', side_effect=messages):
+            result = run_chat(ChatRequest(question='你好'), None, 'opencode')
+        self.assertEqual(result['answer'], '已有足够信息')
+        self.assertEqual(result['trace'][0]['status'], 'invalid_clarification')
+        self.assertFalse(result['cards'])
+
     def test_unsupported_stream_falls_back_to_regular_tool_call(self):
         from backend.chat_agent import run_chat
         from backend.learning_chat import ChatRequest

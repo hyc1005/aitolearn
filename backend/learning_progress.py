@@ -54,6 +54,10 @@ def answer_progress(conn, snapshot, request):
     asks_trend, asks_teaching = TREND.search(request.question), TEACHING.search(request.question)
     if not (asks_trend or asks_teaching):
         return None
+    # A pure teaching-material shortcut must not swallow a request that also
+    # asks the agent to interpret a student's evidence or performance.
+    if not asks_trend and re.search(r'原始作答|学生作答|表现|学情|为什么|为何|原因|针对.*学生', request.question):
+        return None
     data = table_data(snapshot)
     scope = resolve(data, request.question, {'student': request.student, 'group': request.group, 'node': request.node})
     skills = named_skills(data['课程要求'], request.question)

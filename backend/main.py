@@ -227,7 +227,8 @@ def learning_chat(request: ChatRequest):
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         saved = save_session(conn, request.session_id, request, result)
-        return {**result, "session_id": saved["id"], "context": saved["context"]}
+        return {**result, "session_id": saved["id"], "context": saved["context"],
+                "title": session_summary(saved)["title"]}
 
 
 @app.post('/api/learning-chat/stream')
@@ -853,7 +854,8 @@ async def submit_chat_attachments(files: list[UploadFile] = File(...),
             request = ChatRequest(question=("上传附件：" + "、".join(seen_in_order(files)))[:1200],
                                   **{key: ctx.get(key, "") for key in ("student", "group", "node")})
             saved = save_session(conn, session_id or None, request, answer)
-            result = {**answer, "question": request.question, "session_id": saved["id"]}
+            result = {**answer, "question": request.question, "session_id": saved["id"],
+                      "title": session_summary(saved)["title"]}
             put(conn, "attachment_receipt", batch_id, result)
             return result
     except BaseException:

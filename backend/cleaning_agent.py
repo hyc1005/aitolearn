@@ -76,7 +76,8 @@ def review_import(snapshot, previous, session):
     report = snapshot["report"]
     counts = {key: report[key] for key in
               ("input_attempts", "duplicate_attempts", "raw_attempts", "events", "valid_scored")}
-    counts.update(scored=report["states"]["已评分"], issues=len(report["issues"]))
+    counts.update(scored=report["states"]["已评分"], pending=report["states"]["待评分"],
+                  unanswered=report["states"]["未作答"], issues=len(report["issues"]))
     issues = [{"id": issue["id"], "field": issue["field"], "reason": issue["reason"]}
               for issue in report["issues"]]
     examples = list({issue["reason"]: issue for issue in reversed(issues)}.values())[:20]
@@ -87,7 +88,9 @@ def review_import(snapshot, previous, session):
              if previous else None}
     review, model = validated_review(
         CleaningReview,
-        "复核七年级数学清洗结果。summary 说明异常会影响哪些判断。findings 指出教师需要核对的事项，"
+        "复核七年级数学清洗结果。counts 中 pending 是待评分、unanswered 是未作答，均是正常状态而非自动判为异常；"
+        "valid_scored 只统计有效已评分作答，不能要求它与全部作答相等。"
+        "summary 说明异常会影响哪些判断。findings 指出教师需要核对的事项，"
         "引用 allowed_refs。已隔离异常可以 ready，只有整体数据需要修订时选 needs_revision 并给出依据。",
         facts, session,
         lambda result: (all(set(item.refs) <= refs for item in result.findings)

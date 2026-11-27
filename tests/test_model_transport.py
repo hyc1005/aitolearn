@@ -10,6 +10,20 @@ from backend.recommendation_review import FinalReview, representative_events, re
 
 
 class ModelTransportTests(unittest.TestCase):
+    def test_cleaning_review_receives_pending_and_unanswered_counts(self):
+        from backend.cleaning_agent import review_import
+        snapshot = {"output_hash": "example", "rules_version": "1", "report": {
+            "input_attempts": 3, "duplicate_attempts": 0, "raw_attempts": 3, "events": 3,
+            "valid_scored": 1, "states": {"已评分": 1, "待评分": 1, "未作答": 1},
+            "issues": [], "issue_counts": {},
+        }}
+        review = CleaningReview(summary="三种状态均已核对", findings=[], decision="ready")
+        with patch("backend.cleaning_agent.structured_review", return_value=(review, "stub")) as model:
+            result = review_import(snapshot, None, "example")
+        facts = model.call_args.args[2]
+        self.assertEqual((facts["counts"]["scored"], facts["counts"]["pending"], facts["counts"]["unanswered"]), (1, 1, 1))
+        self.assertEqual(result["decision"], "ready")
+
     def call(self, results):
         sent = []
 

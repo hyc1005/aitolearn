@@ -68,7 +68,7 @@ def complete_with_tools(provider, messages, session, **options):
     return _complete(provider, messages, session, True, **options)
 
 
-def stream_with_tools(provider, messages, session, **options):
+def stream_with_tools(provider, messages, session, *, round_id=None, **options):
     """Collect a streamed tool response while exposing only provider reasoning chunks."""
     import json
     from .chat_stream import emit
@@ -112,7 +112,7 @@ def stream_with_tools(provider, messages, session, **options):
                         if isinstance(delta.get('reasoning_content'), str):
                             chunk = delta['reasoning_content']
                             reasoning.append(chunk)
-                            emit('reasoning', text=chunk)
+                            emit('reasoning', text=chunk, round_id=round_id)
                         if isinstance(delta.get('content'), str):
                             content.append(delta['content'])
                         for call in delta.get('tool_calls') or []:
